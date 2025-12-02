@@ -14,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/NaveLIL/erez-monitor/alerter"
 	"github.com/NaveLIL/erez-monitor/autostart"
@@ -25,9 +26,22 @@ import (
 	"github.com/NaveLIL/erez-monitor/ui"
 )
 
+var (
+	kernel32         = syscall.NewLazyDLL("kernel32.dll")
+	procCreateMutexW = kernel32.NewProc("CreateMutexW")
+	procGetLastError = kernel32.NewProc("GetLastError")
+	procReleaseMutex = kernel32.NewProc("ReleaseMutex")
+	procCloseHandle  = kernel32.NewProc("CloseHandle")
+)
+
+const (
+	ERROR_ALREADY_EXISTS = 183
+)
+
 const (
 	appName    = "EREZMonitor"
 	appVersion = "1.0.0"
+	mutexName  = "Global\\EREZMonitorSingleInstance"
 )
 
 // Application holds all application components.
@@ -41,10 +55,30 @@ type Application struct {
 	overlay   *ui.Overlay
 	hotkeys   *hotkeys.Manager
 	autostart *autostart.Manager
+	mutex     uintptr // Single instance mutex handle
 
 	ctx          context.Context
 	cancel       context.CancelFunc
 	shutdownOnce sync.Once
+}
+
+// checkSingleInstance ensures only one instance of the app is running.
+// Returns the mutex handle if this is the first instance, 0 otherwise.
+func checkSingleInstance() (uintptr, bool) {
+	mutexNamePtr, _ := syscall.UTF16PtrFromString(mutexName)
+	handle, _, _ := procCreateMutexW.Call(0, 0, uintptr(unsafe.Pointer(mutexNamePtr)))
+
+	if handle == 0 {
+		return 0, false
+	}
+
+	lastErr, _, _ := procGetLastError.Call()
+	if lastErr == ERROR_ALREADY_EXISTS {
+		procCloseHandle.Call(handle)
+		return 0, false
+	}
+
+	return handle, true
 }
 
 func main() {
@@ -60,8 +94,17 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Check for single instance
+	mutex, isFirst := checkSingleInstance()
+	if !isFirst {
+		fmt.Fprintf(os.Stderr, "%s is already running!\n", appName)
+		os.Exit(1)
+	}
+
 	// Create application
-	app := &Application{}
+	app := &Application{
+		mutex: mutex,
+	}
 
 	// Initialize and run
 	if err := app.init(*configPath, *debug); err != nil {
@@ -297,6 +340,12 @@ func (app *Application) shutdown() {
 		// Quit tray (this will cause systray.Run to return)
 		if app.tray != nil {
 			app.tray.Quit()
+		}
+
+		// Release single instance mutex
+		if app.mutex != 0 {
+			procReleaseMutex.Call(app.mutex)
+			procCloseHandle.Call(app.mutex)
 		}
 
 		// Force exit after a short delay

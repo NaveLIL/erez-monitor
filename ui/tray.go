@@ -131,11 +131,12 @@ func (t *TrayUI) onExit() {
 func (t *TrayUI) handleMenuEvents() {
 	for {
 		t.mu.Lock()
-		if t.quitting {
-			t.mu.Unlock()
+		quitting := t.quitting
+		t.mu.Unlock()
+
+		if quitting {
 			return
 		}
-		t.mu.Unlock()
 
 		select {
 		case <-t.mShowDetails.ClickedCh:

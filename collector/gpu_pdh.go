@@ -333,7 +333,14 @@ func (c *PDHGPUCollector) Shutdown() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	close(c.stopCh)
+	if c.initialized {
+		select {
+		case <-c.stopCh:
+			// Already closed
+		default:
+			close(c.stopCh)
+		}
+	}
 
 	if c.query != 0 {
 		procPdhCloseQuery.Call(c.query)

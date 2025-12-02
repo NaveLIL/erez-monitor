@@ -240,7 +240,12 @@ func (c *PingCollector) Shutdown() {
 	defer c.mu.Unlock()
 
 	if c.initialized {
-		close(c.stopCh)
+		select {
+		case <-c.stopCh:
+			// Already closed
+		default:
+			close(c.stopCh)
+		}
 		c.initialized = false
 	}
 }
