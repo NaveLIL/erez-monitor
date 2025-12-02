@@ -104,17 +104,19 @@ const (
 
 // Color constants (BGR format)
 const (
-	COLOR_BG_DARK    = 0x1A1A1A // Darker background
-	COLOR_BG_ACCENT  = 0x2A2A2A // Accent background
-	COLOR_TEXT_WHITE = 0xE0E0E0 // Soft white text
-	COLOR_TEXT_GRAY  = 0x888888 // Gray text for labels
-	COLOR_GREEN      = 0x00DD77 // Bright green (good)
-	COLOR_YELLOW     = 0x00DDDD // Yellow/cyan (warning)
-	COLOR_ORANGE     = 0x0088FF // Orange (high)
-	COLOR_RED        = 0x4444FF // Red (critical)
-	COLOR_CYAN       = 0xFFDD00 // Cyan for network
-	COLOR_PURPLE     = 0xFF6699 // Pink/purple for disk
-	COLOR_BLUE       = 0xFF8844 // Blue for FPS/info
+	COLOR_BG_DARK    = 0x1E1E1E // Darker background
+	COLOR_BG_LIGHT   = 0x2D2D2D // Lighter background for bars
+	COLOR_BG_BAR     = 0x3D3D3D // Progress bar background
+	COLOR_TEXT_WHITE = 0xF0F0F0 // Bright white text
+	COLOR_TEXT_GRAY  = 0x909090 // Gray text for labels
+	COLOR_GREEN      = 0x50C878 // Emerald green (good)
+	COLOR_YELLOW     = 0x00D4FF // Gold/yellow (warning)
+	COLOR_ORANGE     = 0x0099FF // Orange (high)
+	COLOR_RED        = 0x5050FF // Red (critical)
+	COLOR_CYAN       = 0xFFDD44 // Cyan for network
+	COLOR_PURPLE     = 0xDD77FF // Purple for disk
+	COLOR_BLUE       = 0xFF9944 // Blue accent
+	COLOR_ACCENT     = 0xFF7744 // Main accent color
 )
 
 // WNDCLASSEXW represents the WNDCLASSEXW structure.
@@ -195,8 +197,8 @@ func NewOverlay(cfg *config.OverlayConfig, coll *collector.Collector) *Overlay {
 		config:    cfg,
 		collector: coll,
 		stopCh:    make(chan struct{}),
-		width:     220,
-		height:    175,
+		width:     240,
+		height:    195,
 	}
 }
 
@@ -575,36 +577,33 @@ func (o *Overlay) paint(hwnd uintptr) {
 		metrics = o.collector.GetLatest()
 	}
 
-	// Main background
+	// Main background with rounded effect (dark edges)
 	bgBrush, _, _ := procCreateSolidBrush.Call(COLOR_BG_DARK)
 	rect := RECT{Left: 0, Top: 0, Right: o.width, Bottom: o.height}
 	procFillRect.Call(hdc, uintptr(unsafe.Pointer(&rect)), bgBrush)
 	procDeleteObject.Call(bgBrush)
 
-	// Left accent bar - orange when in drag mode, green otherwise
+	// Left accent bar - changes color based on mode
 	o.mu.RLock()
 	isDragMode := o.dragMode
 	o.mu.RUnlock()
 
-	accentColor := uintptr(COLOR_GREEN)
+	accentColor := uintptr(COLOR_ACCENT)
 	if isDragMode {
-		accentColor = uintptr(0x0099FF) // Orange color (BGR format)
+		accentColor = uintptr(COLOR_ORANGE)
 	}
 	accentBrush, _, _ := procCreateSolidBrush.Call(accentColor)
-	accentRect := RECT{Left: 0, Top: 0, Right: 3, Bottom: o.height}
+	accentRect := RECT{Left: 0, Top: 0, Right: 4, Bottom: o.height}
 	procFillRect.Call(hdc, uintptr(unsafe.Pointer(&accentRect)), accentBrush)
 	procDeleteObject.Call(accentBrush)
 
-	// If in drag mode, also draw a border around the overlay
+	// If in drag mode, draw border
 	if isDragMode {
-		borderBrush, _, _ := procCreateSolidBrush.Call(0x0099FF) // Orange
-		// Top border
+		borderBrush, _, _ := procCreateSolidBrush.Call(COLOR_ORANGE)
 		topRect := RECT{Left: 0, Top: 0, Right: o.width, Bottom: 2}
 		procFillRect.Call(hdc, uintptr(unsafe.Pointer(&topRect)), borderBrush)
-		// Bottom border
 		bottomRect := RECT{Left: 0, Top: o.height - 2, Right: o.width, Bottom: o.height}
 		procFillRect.Call(hdc, uintptr(unsafe.Pointer(&bottomRect)), borderBrush)
-		// Right border
 		rightRect := RECT{Left: o.width - 2, Top: 0, Right: o.width, Bottom: o.height}
 		procFillRect.Call(hdc, uintptr(unsafe.Pointer(&rightRect)), borderBrush)
 		procDeleteObject.Call(borderBrush)
@@ -612,72 +611,61 @@ func (o *Overlay) paint(hwnd uintptr) {
 
 	procSetBkMode.Call(hdc, TRANSPARENT)
 
+	// Layout constants
 	y := int32(10)
-	lineHeight := int32(22)
+	rowHeight := int32(28)
 	labelX := int32(12)
-	valueX := int32(55)
-	infoX := int32(115)
+	barX := int32(52)
+	barWidth := int32(120)
+	barHeight := int32(8)
+	valueX := int32(180)
 
 	if metrics != nil {
-		// === CPU ===
+		// === CPU with progress bar ===
 		if o.config.ShowCPU {
-			procSelectObject.Call(hdc, o.fontSmall)
-			procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
-			o.drawText(hdc, "CPU", labelX, y+2)
-
-			procSelectObject.Call(hdc, o.fontLarge)
-			procSetTextColor.Call(hdc, getValueColor(metrics.CPU.UsagePercent))
-			o.drawText(hdc, fmt.Sprintf("%.0f%%", metrics.CPU.UsagePercent), valueX, y)
-
-			if metrics.CPU.Temperature > 0 {
-				procSelectObject.Call(hdc, o.fontSmall)
-				procSetTextColor.Call(hdc, getTempColor(uint32(metrics.CPU.Temperature)))
-				o.drawText(hdc, fmt.Sprintf("%.0f°C", metrics.CPU.Temperature), infoX+20, y+2)
-			}
-			y += lineHeight
+			o.drawMetricRow(hdc, "CPU", metrics.CPU.UsagePercent, y, labelX, barX, barWidth, barHeight, valueX)
+			y += rowHeight
 		}
 
-		// === RAM ===
+		// === RAM with progress bar ===
 		if o.config.ShowRAM {
+			o.drawMetricRow(hdc, "RAM", metrics.Memory.UsedPercent, y, labelX, barX, barWidth, barHeight, valueX)
+			// Draw memory info below bar
 			procSelectObject.Call(hdc, o.fontSmall)
 			procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
-			o.drawText(hdc, "RAM", labelX, y+2)
-
-			procSelectObject.Call(hdc, o.fontLarge)
-			procSetTextColor.Call(hdc, getValueColor(metrics.Memory.UsedPercent))
-			o.drawText(hdc, fmt.Sprintf("%.0f%%", metrics.Memory.UsedPercent), valueX, y)
-
-			procSelectObject.Call(hdc, o.fontSmall)
-			procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
-			o.drawText(hdc, fmt.Sprintf("%d/%dG", metrics.Memory.UsedMB/1024, metrics.Memory.TotalMB/1024), infoX, y+2)
-			y += lineHeight
+			memText := fmt.Sprintf("%dG / %dG", metrics.Memory.UsedMB/1024, metrics.Memory.TotalMB/1024)
+			o.drawText(hdc, memText, barX, y+12)
+			y += rowHeight + 4
 		}
 
-		// === GPU ===
+		// === GPU with progress bar ===
 		if o.config.ShowGPU && metrics.GPU.Available {
+			o.drawMetricRow(hdc, "GPU", metrics.GPU.UsagePercent, y, labelX, barX, barWidth, barHeight, valueX)
+			// Draw VRAM and temperature info below bar
 			procSelectObject.Call(hdc, o.fontSmall)
 			procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
-			o.drawText(hdc, "GPU", labelX, y+2)
-
-			procSelectObject.Call(hdc, o.fontLarge)
-			procSetTextColor.Call(hdc, getValueColor(metrics.GPU.UsagePercent))
-			o.drawText(hdc, fmt.Sprintf("%.0f%%", metrics.GPU.UsagePercent), valueX, y)
-
+			// Shorter VRAM format
+			vramGB := float64(metrics.GPU.VRAMUsedMB) / 1024.0
+			totalGB := float64(metrics.GPU.VRAMTotalMB) / 1024.0
+			vramText := fmt.Sprintf("%.1fG/%.0fG", vramGB, totalGB)
+			o.drawText(hdc, vramText, barX, y+12)
+			// Show temperature if available
 			if metrics.GPU.TemperatureC > 0 {
-				procSelectObject.Call(hdc, o.fontSmall)
 				procSetTextColor.Call(hdc, getTempColor(metrics.GPU.TemperatureC))
-				o.drawText(hdc, fmt.Sprintf("%d°C", metrics.GPU.TemperatureC), infoX+20, y+2)
+				tempText := fmt.Sprintf("%d°C", metrics.GPU.TemperatureC)
+				o.drawText(hdc, tempText, barX+75, y+12)
 			}
-			y += lineHeight
+			y += rowHeight + 4
 		}
 
-		// Separator line (only if we have network or disk to show)
+		// Separator line
 		if o.config.ShowNet || o.config.ShowDisk {
-			sepBrush, _, _ := procCreateSolidBrush.Call(0x333333)
-			sepRect := RECT{Left: 10, Top: y, Right: o.width - 10, Bottom: y + 1}
+			y += 2
+			sepBrush, _, _ := procCreateSolidBrush.Call(COLOR_BG_BAR)
+			sepRect := RECT{Left: 12, Top: y, Right: o.width - 12, Bottom: y + 1}
 			procFillRect.Call(hdc, uintptr(unsafe.Pointer(&sepRect)), sepBrush)
 			procDeleteObject.Call(sepBrush)
-			y += 6
+			y += 8
 		}
 
 		// === Network ===
@@ -686,54 +674,98 @@ func (o *Overlay) paint(hwnd uintptr) {
 			procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
 			o.drawText(hdc, "NET", labelX, y)
 
+			// Download
 			procSetTextColor.Call(hdc, COLOR_CYAN)
-			var dlText, ulText string
+			var dlText string
 			if metrics.Network.DownloadKBps >= 1024 {
-				dlText = fmt.Sprintf("↓%.1fM", metrics.Network.DownloadKBps/1024)
+				dlText = fmt.Sprintf("↓%.1f MB/s", metrics.Network.DownloadKBps/1024)
 			} else {
-				dlText = fmt.Sprintf("↓%.0fK", metrics.Network.DownloadKBps)
+				dlText = fmt.Sprintf("↓%.0f KB/s", metrics.Network.DownloadKBps)
 			}
+			o.drawText(hdc, dlText, barX, y)
+
+			// Upload
+			var ulText string
 			if metrics.Network.UploadKBps >= 1024 {
-				ulText = fmt.Sprintf("↑%.1fM", metrics.Network.UploadKBps/1024)
+				ulText = fmt.Sprintf("↑%.1f MB/s", metrics.Network.UploadKBps/1024)
 			} else {
-				ulText = fmt.Sprintf("↑%.0fK", metrics.Network.UploadKBps)
+				ulText = fmt.Sprintf("↑%.0f KB/s", metrics.Network.UploadKBps)
 			}
-			o.drawText(hdc, dlText, valueX-5, y)
-			o.drawText(hdc, ulText, infoX+15, y)
-			y += lineHeight - 4
+			o.drawText(hdc, ulText, barX+85, y)
+			y += 18
 
 			// === Ping ===
 			if metrics.Network.PingMs > 0 {
-				procSelectObject.Call(hdc, o.fontSmall)
 				procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
 				o.drawText(hdc, "PING", labelX, y)
 
 				procSetTextColor.Call(hdc, getPingColor(metrics.Network.PingMs))
-				o.drawText(hdc, fmt.Sprintf("%.0fms", metrics.Network.PingMs), valueX-5, y)
+				pingText := fmt.Sprintf("%.0f ms", metrics.Network.PingMs)
+				o.drawText(hdc, pingText, barX, y)
 
 				procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
-				o.drawText(hdc, metrics.Network.PingTarget, infoX, y)
-				y += lineHeight - 4
+				o.drawText(hdc, metrics.Network.PingTarget, barX+55, y)
+				y += 18
 			}
 		}
 
-		// === Disk I/O ===
-		if o.config.ShowDisk && (metrics.Disk.ReadMBps > 0.01 || metrics.Disk.WriteMBps > 0.01) {
+		// === Disk I/O (only if active) ===
+		if o.config.ShowDisk && (metrics.Disk.ReadMBps > 0.05 || metrics.Disk.WriteMBps > 0.05) {
 			procSelectObject.Call(hdc, o.fontSmall)
 			procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
 			o.drawText(hdc, "DISK", labelX, y)
 
 			procSetTextColor.Call(hdc, COLOR_PURPLE)
-			o.drawText(hdc, fmt.Sprintf("R:%.1f W:%.1f", metrics.Disk.ReadMBps, metrics.Disk.WriteMBps), valueX-5, y)
+			diskText := fmt.Sprintf("R:%.1f  W:%.1f MB/s", metrics.Disk.ReadMBps, metrics.Disk.WriteMBps)
+			o.drawText(hdc, diskText, barX, y)
 		}
 
 	} else {
 		procSelectObject.Call(hdc, o.fontLarge)
 		procSetTextColor.Call(hdc, COLOR_TEXT_WHITE)
-		o.drawText(hdc, "Loading...", 12, 60)
+		o.drawText(hdc, "Loading...", 12, 80)
 	}
 
 	procEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
+}
+
+// drawMetricRow draws a metric row with label, progress bar, and value
+func (o *Overlay) drawMetricRow(hdc uintptr, label string, percent float64, y, labelX, barX, barWidth, barHeight, valueX int32) {
+	// Draw label
+	procSelectObject.Call(hdc, o.fontSmall)
+	procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
+	o.drawText(hdc, label, labelX, y)
+
+	// Draw progress bar background
+	barY := y + 2
+	bgBrush, _, _ := procCreateSolidBrush.Call(COLOR_BG_BAR)
+	bgRect := RECT{Left: barX, Top: barY, Right: barX + barWidth, Bottom: barY + barHeight}
+	procFillRect.Call(hdc, uintptr(unsafe.Pointer(&bgRect)), bgBrush)
+	procDeleteObject.Call(bgBrush)
+
+	// Draw progress bar fill - always show at least a small amount if > 0
+	if percent > 0.5 {
+		fillWidth := int32(float64(barWidth) * percent / 100.0)
+		if fillWidth < 4 {
+			fillWidth = 4 // Minimum visible width
+		}
+		if fillWidth > barWidth {
+			fillWidth = barWidth
+		}
+
+		fillColor := getValueColor(percent)
+		fillBrush, _, _ := procCreateSolidBrush.Call(fillColor)
+		fillRect := RECT{Left: barX, Top: barY, Right: barX + fillWidth, Bottom: barY + barHeight}
+		procFillRect.Call(hdc, uintptr(unsafe.Pointer(&fillRect)), fillBrush)
+		procFillRect.Call(hdc, uintptr(unsafe.Pointer(&fillRect)), fillBrush)
+		procDeleteObject.Call(fillBrush)
+	}
+
+	// Draw value text
+	procSelectObject.Call(hdc, o.fontLarge)
+	procSetTextColor.Call(hdc, getValueColor(percent))
+	valueText := fmt.Sprintf("%.0f%%", percent)
+	o.drawText(hdc, valueText, valueX, y-2)
 }
 
 func (o *Overlay) drawText(hdc uintptr, text string, x, y int32) {

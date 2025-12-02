@@ -41,12 +41,16 @@ type PDHGPUCollector struct {
 	log         *logger.Logger
 
 	// PDH handles
-	query    uintptr
-	counters []uintptr
+	query        uintptr
+	counters     []uintptr
+	vramCounters []uintptr
 
 	// Cached values
-	cachedUsage float64
-	usageMu     sync.RWMutex
+	cachedUsage    float64
+	cachedVRAMUsed uint64
+	cachedTemp     float64
+	cachedPower    float64
+	usageMu        sync.RWMutex
 
 	// GPU info
 	gpuName     string
@@ -139,7 +143,46 @@ func (c *PDHGPUCollector) Init() error {
 		return nil
 	}
 
-	c.log.Infof("GPU detected: %s (VRAM: %d MB), %d PDH counters", gpuName, vram, len(c.counters))
+	// Try to add VRAM usage counters
+	vramPath := utf16PtrFromString(`\GPU Process Memory(*)\Dedicated Usage`)
+	bufferSize = 0
+	ret, _, _ = procPdhExpandWildCardPathW.Call(
+		0,
+		uintptr(unsafe.Pointer(vramPath)),
+		0,
+		uintptr(unsafe.Pointer(&bufferSize)),
+		0,
+	)
+
+	if bufferSize > 0 {
+		buffer := make([]uint16, bufferSize)
+		ret, _, _ = procPdhExpandWildCardPathW.Call(
+			0,
+			uintptr(unsafe.Pointer(vramPath)),
+			uintptr(unsafe.Pointer(&buffer[0])),
+			uintptr(unsafe.Pointer(&bufferSize)),
+			0,
+		)
+
+		if ret == 0 {
+			paths := parseMultiString(buffer)
+			for _, path := range paths {
+				var counter uintptr
+				pathPtr := utf16PtrFromString(path)
+				ret, _, _ = procPdhAddCounterW.Call(
+					c.query,
+					uintptr(unsafe.Pointer(pathPtr)),
+					0,
+					uintptr(unsafe.Pointer(&counter)),
+				)
+				if ret == 0 {
+					c.vramCounters = append(c.vramCounters, counter)
+				}
+			}
+		}
+	}
+
+	c.log.Infof("GPU detected: %s (VRAM: %d MB), %d usage counters, %d VRAM counters", gpuName, vram, len(c.counters), len(c.vramCounters))
 	c.initialized = true
 
 	// Initial collection to prime the counters
@@ -179,6 +222,7 @@ func (c *PDHGPUCollector) collectPDH() {
 	c.mu.Lock()
 	query := c.query
 	counters := c.counters
+	vramCounters := c.vramCounters
 	c.mu.Unlock()
 
 	if query == 0 || len(counters) == 0 {
@@ -191,7 +235,7 @@ func (c *PDHGPUCollector) collectPDH() {
 		return
 	}
 
-	// Sum all counter values
+	// Sum all GPU usage counter values
 	var totalUsage float64
 	for _, counter := range counters {
 		var value PDH_FMT_COUNTERVALUE
@@ -211,8 +255,32 @@ func (c *PDHGPUCollector) collectPDH() {
 		totalUsage = 100
 	}
 
+	// Sum all VRAM counter values (in bytes)
+	var totalVRAM float64
+	for _, counter := range vramCounters {
+		var value PDH_FMT_COUNTERVALUE
+		ret, _, _ := procPdhGetFormattedValue.Call(
+			counter,
+			PDH_FMT_DOUBLE,
+			0,
+			uintptr(unsafe.Pointer(&value)),
+		)
+		if ret == 0 && value.DoubleValue > 0 {
+			totalVRAM += value.DoubleValue
+		}
+	}
+
+	// Convert bytes to MB
+	vramUsedMB := uint64(totalVRAM / (1024 * 1024))
+
+	// Get temperature via D3DKMT API (same as Task Manager uses)
+	temp, power, _, _ := GetGPUPerfDataD3DKMT()
+
 	c.usageMu.Lock()
 	c.cachedUsage = totalUsage
+	c.cachedVRAMUsed = vramUsedMB
+	c.cachedTemp = temp
+	c.cachedPower = power
 	c.usageMu.Unlock()
 }
 
@@ -236,6 +304,9 @@ func (c *PDHGPUCollector) backgroundUpdateSimple() {
 func (c *PDHGPUCollector) Collect() models.GPUMetrics {
 	c.usageMu.RLock()
 	usage := c.cachedUsage
+	vramUsed := c.cachedVRAMUsed
+	temp := c.cachedTemp
+	power := c.cachedPower
 	c.usageMu.RUnlock()
 
 	return models.GPUMetrics{
@@ -243,7 +314,9 @@ func (c *PDHGPUCollector) Collect() models.GPUMetrics {
 		Name:         c.gpuName,
 		VRAMTotalMB:  c.vramTotalMB,
 		UsagePercent: usage,
-		VRAMUsedMB:   0,
+		VRAMUsedMB:   vramUsed,
+		TemperatureC: uint32(temp),
+		PowerWatts:   power,
 	}
 }
 
