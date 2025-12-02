@@ -1,0 +1,93 @@
+# EREZMonitor Configuration
+# This file contains all settings for the system monitor
+
+monitoring:
+  # How often to collect metrics (minimum: 100ms)
+  update_interval: 1s
+  # How long to keep metrics history
+  history_duration: 60s
+  # Enable NVIDIA GPU monitoring (requires NVIDIA GPU with NVML)
+  enable_gpu: true
+  # Enable process monitoring
+  enable_processes: true
+  # Number of top processes to track (by CPU and memory)
+  top_process_count: 10
+
+alerts:
+  # Enable/disable all alerts
+  enabled: true
+  # CPU usage threshold for alerts (percentage)
+  cpu_threshold: 80
+  # RAM usage threshold for alerts (percentage)
+  ram_threshold: 85
+  # GPU usage threshold for alerts (percentage)
+  gpu_threshold: 85
+  # GPU temperature threshold for alerts (Celsius)
+  gpu_temp_threshold: 85
+  # Disk usage threshold for alerts (percentage)
+  disk_threshold: 90
+  # Minimum time between repeated alerts of the same type
+  cooldown: 30s
+  # Enable sound notifications
+  sound_enabled: true
+
+ui:
+  # Enable system tray icon
+  tray_enabled: true
+  # Start application with Windows
+  autostart: false
+  # Global hotkey to show/hide main window
+  hotkey: "Ctrl+Shift+M"
+  # UI theme: "dark" or "light"
+  theme: "dark"
+  # UI language
+  language: "en"
+  # Default window dimensions
+  window_width: 800
+  window_height: 600
+  # How often to refresh UI elements
+  refresh_rate: 500ms
+
+overlay:
+  # Enable overlay (displays over games)
+  enabled: false
+  # Position: "top-right", "top-left", "bottom-right", "bottom-left"
+  position: "top-right"
+  # Overlay transparency (0.0 = transparent, 1.0 = opaque)
+  opacity: 0.8
+  # Font size in pixels
+  font_size: 16
+  # Show FPS counter (if available)
+  show_fps: true
+  # Show CPU usage
+  show_cpu: true
+  # Show RAM usage
+  show_ram: true
+  # Show GPU usage
+  show_gpu: true
+  # Background color (hex)
+  background_color: "#000000"
+  # Text color (hex)
+  text_color: "#FFFFFF"
+  # Hotkey to toggle overlay
+  hotkey: "Ctrl+Shift+O"
+
+logging:
+  # Log level: "debug", "info", "warn", "error"
+  level: "info"
+  # Write logs to file
+  to_file: true
+  # Log file path (relative to config directory or absolute)
+  file_path: "logs/erez-monitor.log"
+  # Export metrics to CSV
+  csv_export: true
+  # CSV file path
+  csv_path: "logs/metrics.csv"
+  # Maximum log file size before rotation
+  max_file_size: "10MB"
+  # Log rotation strategy: "daily", "size", "both"
+  rotation: "daily"
+  # Maximum age of log files in days
+  max_age: 7
+  # Maximum number of old log files to keep
+  max_backups: 5
