@@ -3,7 +3,9 @@ package hotkeys
 
 import (
 	"context"
+	"runtime"
 	"sync"
+	"time"
 
 	"github.com/NaveLIL/erez-monitor/logger"
 	"github.com/NaveLIL/erez-monitor/utils"
@@ -20,34 +22,62 @@ const (
 // HotkeyHandler is a function that handles a hotkey press.
 type HotkeyHandler func()
 
+// hotkeyRegistration holds info needed to register a hotkey.
+type hotkeyRegistration struct {
+	id       HotkeyID
+	hotkey   string
+	handler  HotkeyHandler
+	resultCh chan error
+}
+
 // Manager manages global hotkey registration.
 type Manager struct {
-	handlers map[HotkeyID]HotkeyHandler
-	mu       sync.RWMutex
-	log      *logger.Logger
-	hwnd     uintptr
-	running  bool
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
+	handlers   map[HotkeyID]HotkeyHandler
+	mu         sync.RWMutex
+	log        *logger.Logger
+	running    bool
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	registerCh chan hotkeyRegistration
 }
 
 // New creates a new hotkey manager.
 func New() *Manager {
 	return &Manager{
-		handlers: make(map[HotkeyID]HotkeyHandler),
-		log:      logger.Get(),
+		handlers:   make(map[HotkeyID]HotkeyHandler),
+		log:        logger.Get(),
+		registerCh: make(chan hotkeyRegistration, 10),
 	}
 }
 
 // Register registers a global hotkey.
+// This sends the registration to the message loop goroutine.
 func (m *Manager) Register(id HotkeyID, hotkey string, handler HotkeyHandler) error {
+	reg := hotkeyRegistration{
+		id:       id,
+		hotkey:   hotkey,
+		handler:  handler,
+		resultCh: make(chan error, 1),
+	}
+
+	select {
+	case m.registerCh <- reg:
+		return <-reg.resultCh
+	default:
+		m.log.Warnf("Failed to queue hotkey registration: %s", hotkey)
+		return nil
+	}
+}
+
+// registerInternal actually registers the hotkey (must be called from message loop thread).
+func (m *Manager) registerInternal(id HotkeyID, hotkey string, handler HotkeyHandler) error {
 	modifiers, vk, ok := utils.ParseHotkey(hotkey)
 	if !ok {
 		m.log.Warnf("Failed to parse hotkey: %s", hotkey)
-		return nil // Don't fail, just skip
+		return nil
 	}
 
-	err := utils.RegisterHotKey(m.hwnd, int(id), modifiers, vk)
+	err := utils.RegisterHotKey(0, int(id), modifiers, vk)
 	if err != nil {
 		m.log.Warnf("Failed to register hotkey %s: %v", hotkey, err)
 		return err
@@ -63,7 +93,7 @@ func (m *Manager) Register(id HotkeyID, hotkey string, handler HotkeyHandler) er
 
 // Unregister unregisters a global hotkey.
 func (m *Manager) Unregister(id HotkeyID) error {
-	err := utils.UnregisterHotKey(m.hwnd, int(id))
+	err := utils.UnregisterHotKey(0, int(id))
 	if err != nil {
 		return err
 	}
@@ -125,32 +155,39 @@ func (m *Manager) Stop() {
 }
 
 // messageLoop processes Windows messages for hotkey events.
+// IMPORTANT: Hotkey registration and message processing MUST be in the same OS thread.
 func (m *Manager) messageLoop(ctx context.Context) {
 	defer m.wg.Done()
+
+	// Lock this goroutine to the current OS thread
+	// This is required because Windows hotkeys are per-thread
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
 
 	msg := &utils.MSG{}
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		default:
-			// Non-blocking message check
-			// In a real implementation, we'd use a more sophisticated approach
-			// that properly handles the message queue
+		case reg := <-m.registerCh:
+			// Register hotkey in this thread
+			err := m.registerInternal(reg.id, reg.hotkey, reg.handler)
+			reg.resultCh <- err
+		case <-ticker.C:
+			// Check for messages periodically
+			for utils.PeekMessage(msg, 0, 0, 0, 1) { // PM_REMOVE = 1
+				if msg.Message == utils.WM_HOTKEY {
+					id := HotkeyID(msg.WParam)
+					m.mu.RLock()
+					handler, exists := m.handlers[id]
+					m.mu.RUnlock()
 
-			ok, err := utils.GetMessage(msg, 0, 0, 0)
-			if err != nil || !ok {
-				continue
-			}
-
-			if msg.Message == utils.WM_HOTKEY {
-				id := HotkeyID(msg.WParam)
-				m.mu.RLock()
-				handler, exists := m.handlers[id]
-				m.mu.RUnlock()
-
-				if exists && handler != nil {
-					go handler() // Run handler in separate goroutine
+					if exists && handler != nil {
+						go handler() // Run handler in separate goroutine
+					}
 				}
 			}
 		}

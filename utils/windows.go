@@ -21,6 +21,7 @@ var (
 	procRegisterHotKey             = user32.NewProc("RegisterHotKey")
 	procUnregisterHotKey           = user32.NewProc("UnregisterHotKey")
 	procGetMessageW                = user32.NewProc("GetMessageW")
+	procPeekMessageW               = user32.NewProc("PeekMessageW")
 )
 
 // gwlExStyle returns GWL_EXSTYLE (-20) as uintptr safely.
@@ -196,6 +197,19 @@ func GetMessage(msg *MSG, hwnd uintptr, msgFilterMin, msgFilterMax uint32) (bool
 		return false, err
 	}
 	return ret != 0, nil
+}
+
+// PeekMessage retrieves a message from the message queue without blocking.
+// removeMsg: 0 = PM_NOREMOVE, 1 = PM_REMOVE
+func PeekMessage(msg *MSG, hwnd uintptr, msgFilterMin, msgFilterMax uint32, removeMsg uint32) bool {
+	ret, _, _ := procPeekMessageW.Call(
+		uintptr(unsafe.Pointer(msg)),
+		hwnd,
+		uintptr(msgFilterMin),
+		uintptr(msgFilterMax),
+		uintptr(removeMsg),
+	)
+	return ret != 0
 }
 
 // ParseHotkey parses a hotkey string (e.g., "Ctrl+Shift+M") into modifiers and key.
