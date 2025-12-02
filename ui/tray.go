@@ -34,6 +34,7 @@ type TrayUI struct {
 	// Menu items
 	mShowDetails   *systray.MenuItem
 	mToggleOverlay *systray.MenuItem
+	mMoveOverlay   *systray.MenuItem
 	mSettings      *systray.MenuItem
 	mExportLogs    *systray.MenuItem
 	mAutostart     *systray.MenuItem
@@ -42,6 +43,7 @@ type TrayUI struct {
 	// Callbacks
 	onShowDetails   func()
 	onToggleOverlay func()
+	onMoveOverlay   func()
 	onSettings      func()
 	onExportLogs    func()
 	onAutostart     func() bool // returns new state
@@ -71,9 +73,10 @@ func NewTrayUI(cfg *config.UIConfig, alertCfg *config.AlertsConfig, coll *collec
 }
 
 // SetCallbacks sets the callback functions for menu actions.
-func (t *TrayUI) SetCallbacks(onShowDetails, onToggleOverlay, onSettings, onExportLogs, onQuit func(), onAutostart func() bool) {
+func (t *TrayUI) SetCallbacks(onShowDetails, onToggleOverlay, onMoveOverlay, onSettings, onExportLogs, onQuit func(), onAutostart func() bool) {
 	t.onShowDetails = onShowDetails
 	t.onToggleOverlay = onToggleOverlay
+	t.onMoveOverlay = onMoveOverlay
 	t.onSettings = onSettings
 	t.onExportLogs = onExportLogs
 	t.onAutostart = onAutostart
@@ -99,6 +102,7 @@ func (t *TrayUI) onReady() {
 	// Create menu items
 	t.mShowDetails = systray.AddMenuItem("Show Details", "Open the detailed statistics window")
 	t.mToggleOverlay = systray.AddMenuItem("Toggle Overlay", "Enable/disable the in-game overlay")
+	t.mMoveOverlay = systray.AddMenuItem("Move Overlay", "Enable drag mode to reposition overlay")
 	systray.AddSeparator()
 	t.mSettings = systray.AddMenuItem("Settings", "Open settings")
 	t.mExportLogs = systray.AddMenuItem("Export Logs", "Export metrics to CSV")
@@ -142,6 +146,11 @@ func (t *TrayUI) handleMenuEvents() {
 		case <-t.mToggleOverlay.ClickedCh:
 			if t.onToggleOverlay != nil {
 				t.onToggleOverlay()
+			}
+
+		case <-t.mMoveOverlay.ClickedCh:
+			if t.onMoveOverlay != nil {
+				t.onMoveOverlay()
 			}
 
 		case <-t.mSettings.ClickedCh:

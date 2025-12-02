@@ -4,7 +4,9 @@ package collector
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/NaveLIL/erez-monitor/config"
 	"github.com/NaveLIL/erez-monitor/logger"
@@ -50,9 +52,8 @@ type Collector struct {
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 
-	// Latest metrics cache
-	latest   *models.Metrics
-	latestMu sync.RWMutex
+	// Latest metrics cache - atomic pointer for lock-free reads
+	latestPtr unsafe.Pointer // *models.Metrics
 }
 
 // New creates a new Collector with the given configuration.
@@ -170,69 +171,82 @@ func (c *Collector) collectionLoop(ctx context.Context) {
 func (c *Collector) collect() {
 	metrics := models.NewMetrics()
 
-	var wg sync.WaitGroup
+	// Use timeout for all collection - never block more than 800ms
+	done := make(chan struct{})
 
-	// Collect CPU metrics
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
-		defer recoverPanic("CPU")
-		metrics.CPU = c.cpuCollector.Collect()
-	}()
+		var wg sync.WaitGroup
 
-	// Collect memory metrics
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer recoverPanic("Memory")
-		metrics.Memory = c.memoryCollector.Collect()
-	}()
-
-	// Collect GPU metrics
-	if c.gpuCollector != nil {
+		// Collect CPU metrics
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			defer recoverPanic("GPU")
-			metrics.GPU = c.gpuCollector.Collect()
+			defer recoverPanic("CPU")
+			metrics.CPU = c.cpuCollector.Collect()
 		}()
-	}
 
-	// Collect disk metrics
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer recoverPanic("Disk")
-		metrics.Disk = c.diskCollector.Collect()
-	}()
-
-	// Collect network metrics
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer recoverPanic("Network")
-		metrics.Network = c.networkCollector.Collect()
-	}()
-
-	// Collect process metrics
-	if c.config.EnableProcesses {
+		// Collect memory metrics
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			defer recoverPanic("Processes")
-			metrics.TopProcesses = c.processCollector.Collect()
+			defer recoverPanic("Memory")
+			metrics.Memory = c.memoryCollector.Collect()
 		}()
-	}
 
-	wg.Wait()
+		// Collect GPU metrics - already non-blocking (returns cached)
+		if c.gpuCollector != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer recoverPanic("GPU")
+				metrics.GPU = c.gpuCollector.Collect()
+			}()
+		}
+
+		// Collect disk metrics
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer recoverPanic("Disk")
+			metrics.Disk = c.diskCollector.Collect()
+		}()
+
+		// Collect network metrics
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer recoverPanic("Network")
+			metrics.Network = c.networkCollector.Collect()
+		}()
+
+		// Collect process metrics
+		if c.config.EnableProcesses {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer recoverPanic("Processes")
+				metrics.TopProcesses = c.processCollector.Collect()
+			}()
+		}
+
+		wg.Wait()
+		close(done)
+	}()
+
+	// Wait with timeout
+	select {
+	case <-done:
+		// All collectors finished
+	case <-time.After(800 * time.Millisecond):
+		// Timeout - use partial metrics
+		c.log.Debug("Collection timeout, using partial metrics")
+	}
 
 	// Store metrics
 	c.storage.Add(metrics)
 
-	// Update latest cache
-	c.latestMu.Lock()
-	c.latest = metrics
-	c.latestMu.Unlock()
+	// Update latest cache atomically - no locks!
+	atomic.StorePointer(&c.latestPtr, unsafe.Pointer(metrics))
 
 	// Notify subscribers
 	c.notifySubscribers(metrics)
@@ -260,13 +274,14 @@ func (c *Collector) notifySubscribers(metrics *models.Metrics) {
 }
 
 // GetLatest returns the most recent metrics.
+// Returns pointer to internal struct - do not modify!
+// Uses atomic load - completely lock-free for overlay!
 func (c *Collector) GetLatest() *models.Metrics {
-	c.latestMu.RLock()
-	defer c.latestMu.RUnlock()
-	if c.latest == nil {
+	ptr := atomic.LoadPointer(&c.latestPtr)
+	if ptr == nil {
 		return nil
 	}
-	return c.latest.Clone()
+	return (*models.Metrics)(ptr)
 }
 
 // GetHistory returns the metrics storage buffer.

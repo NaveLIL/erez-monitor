@@ -23,8 +23,12 @@ type Alerter struct {
 	handlersMu sync.RWMutex
 
 	// Cooldown tracking
-	lastAlerts map[models.AlertType]time.Time
+	lastAlerts map[string]time.Time // Changed to string key for per-resource tracking
 	alertsMu   sync.Mutex
+
+	// Track active alerts (don't repeat until resolved)
+	activeAlerts map[string]bool
+	activeMu     sync.Mutex
 
 	// Alert history
 	history   []*models.Alert
@@ -38,10 +42,11 @@ type Alerter struct {
 // New creates a new Alerter with the given configuration.
 func New(cfg *config.AlertsConfig) *Alerter {
 	return &Alerter{
-		config:     cfg,
-		log:        logger.Get(),
-		lastAlerts: make(map[models.AlertType]time.Time),
-		history:    make([]*models.Alert, 0, 100),
+		config:       cfg,
+		log:          logger.Get(),
+		lastAlerts:   make(map[string]time.Time),
+		activeAlerts: make(map[string]bool),
+		history:      make([]*models.Alert, 0, 100),
 	}
 }
 
@@ -90,69 +95,82 @@ func (a *Alerter) Check(metrics *models.Metrics) {
 
 	// Check CPU threshold
 	if metrics.CPU.UsagePercent >= a.config.CPUThreshold {
-		a.triggerAlert(models.AlertTypeCPU,
+		a.triggerAlert("cpu", models.AlertTypeCPU,
 			fmt.Sprintf("CPU usage is %.1f%% (threshold: %.1f%%)",
 				metrics.CPU.UsagePercent, a.config.CPUThreshold),
 			metrics.CPU.UsagePercent,
 			a.config.CPUThreshold)
+	} else {
+		a.clearActiveAlert("cpu")
 	}
 
 	// Check RAM threshold
 	if metrics.Memory.UsedPercent >= a.config.RAMThreshold {
-		a.triggerAlert(models.AlertTypeRAM,
+		a.triggerAlert("ram", models.AlertTypeRAM,
 			fmt.Sprintf("RAM usage is %.1f%% (threshold: %.1f%%)",
 				metrics.Memory.UsedPercent, a.config.RAMThreshold),
 			metrics.Memory.UsedPercent,
 			a.config.RAMThreshold)
+	} else {
+		a.clearActiveAlert("ram")
 	}
 
 	// Check GPU threshold (if available)
 	if metrics.GPU.Available {
 		if metrics.GPU.UsagePercent >= a.config.GPUThreshold {
-			a.triggerAlert(models.AlertTypeGPU,
+			a.triggerAlert("gpu", models.AlertTypeGPU,
 				fmt.Sprintf("GPU usage is %.1f%% (threshold: %.1f%%)",
 					metrics.GPU.UsagePercent, a.config.GPUThreshold),
 				metrics.GPU.UsagePercent,
 				a.config.GPUThreshold)
+		} else {
+			a.clearActiveAlert("gpu")
 		}
 
 		// Check GPU temperature
 		if float64(metrics.GPU.TemperatureC) >= a.config.GPUTempThreshold {
-			a.triggerAlert(models.AlertTypeGPU,
+			a.triggerAlert("gpu_temp", models.AlertTypeGPU,
 				fmt.Sprintf("GPU temperature is %d°C (threshold: %.0f°C)",
 					metrics.GPU.TemperatureC, a.config.GPUTempThreshold),
 				float64(metrics.GPU.TemperatureC),
 				a.config.GPUTempThreshold)
+		} else {
+			a.clearActiveAlert("gpu_temp")
 		}
 	}
 
 	// Check disk thresholds
 	for _, disk := range metrics.Disk.Disks {
+		alertKey := "disk_" + disk.Path
 		if disk.UsedPercent >= a.config.DiskThreshold {
-			a.triggerAlert(models.AlertTypeDisk,
+			a.triggerAlert(alertKey, models.AlertTypeDisk,
 				fmt.Sprintf("Disk %s usage is %.1f%% (threshold: %.1f%%)",
 					disk.Path, disk.UsedPercent, a.config.DiskThreshold),
 				disk.UsedPercent,
 				a.config.DiskThreshold)
+		} else {
+			a.clearActiveAlert(alertKey)
 		}
 	}
 }
 
-// triggerAlert creates and dispatches an alert if cooldown has passed.
-func (a *Alerter) triggerAlert(alertType models.AlertType, message string, value, threshold float64) {
-	a.alertsMu.Lock()
+// clearActiveAlert clears an active alert when condition is resolved.
+func (a *Alerter) clearActiveAlert(key string) {
+	a.activeMu.Lock()
+	defer a.activeMu.Unlock()
+	delete(a.activeAlerts, key)
+}
 
-	// Check cooldown
-	if lastTime, ok := a.lastAlerts[alertType]; ok {
-		if time.Since(lastTime) < a.config.Cooldown {
-			a.alertsMu.Unlock()
-			return
-		}
+// triggerAlert creates and dispatches an alert if not already active.
+func (a *Alerter) triggerAlert(key string, alertType models.AlertType, message string, value, threshold float64) {
+	// Check if alert is already active (don't repeat)
+	a.activeMu.Lock()
+	if a.activeAlerts[key] {
+		a.activeMu.Unlock()
+		return
 	}
-
-	// Update last alert time
-	a.lastAlerts[alertType] = time.Now()
-	a.alertsMu.Unlock()
+	a.activeAlerts[key] = true
+	a.activeMu.Unlock()
 
 	// Create alert
 	alert := &models.Alert{
@@ -258,8 +276,12 @@ func (a *Alerter) ClearHistory() {
 // ResetCooldowns resets all cooldown timers.
 func (a *Alerter) ResetCooldowns() {
 	a.alertsMu.Lock()
-	defer a.alertsMu.Unlock()
-	a.lastAlerts = make(map[models.AlertType]time.Time)
+	a.lastAlerts = make(map[string]time.Time)
+	a.alertsMu.Unlock()
+
+	a.activeMu.Lock()
+	a.activeAlerts = make(map[string]bool)
+	a.activeMu.Unlock()
 }
 
 // UpdateConfig updates the alerter configuration.
@@ -295,6 +317,6 @@ func (a *Alerter) GetLastAlertTime(alertType models.AlertType) (time.Time, bool)
 	a.alertsMu.Lock()
 	defer a.alertsMu.Unlock()
 
-	t, ok := a.lastAlerts[alertType]
+	t, ok := a.lastAlerts[string(alertType)]
 	return t, ok
 }

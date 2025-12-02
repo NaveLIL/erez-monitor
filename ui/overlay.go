@@ -46,6 +46,19 @@ var (
 	procSetTimer                = user32.NewProc("SetTimer")
 	procKillTimer               = user32.NewProc("KillTimer")
 	procGetSystemMetrics        = user32.NewProc("GetSystemMetrics")
+	procGetAsyncKeyState        = user32.NewProc("GetAsyncKeyState")
+	procGetWindowLongW          = user32.NewProc("GetWindowLongW")
+	procSetWindowLongW          = user32.NewProc("SetWindowLongW")
+)
+
+// Virtual key codes
+const (
+	VK_CONTROL = 0x11
+)
+
+// Window long index
+const (
+	GWL_EXSTYLE = -20
 )
 
 // Window style constants
@@ -62,10 +75,19 @@ const (
 
 	LWA_ALPHA = 0x00000002
 
-	WM_DESTROY = 0x0002
-	WM_PAINT   = 0x000F
-	WM_TIMER   = 0x0113
-	WM_CLOSE   = 0x0010
+	WM_DESTROY      = 0x0002
+	WM_PAINT        = 0x000F
+	WM_TIMER        = 0x0113
+	WM_CLOSE        = 0x0010
+	WM_NCHITTEST    = 0x0084
+	WM_LBUTTONDOWN  = 0x0201
+	WM_MOUSEMOVE    = 0x0200
+	WM_LBUTTONUP    = 0x0202
+
+	HTCAPTION   = 2
+	HTTRANSPARENT = -1
+
+	MK_CONTROL = 0x0008
 
 	TRANSPARENT = 1
 	CS_HREDRAW  = 0x0002
@@ -139,9 +161,10 @@ type Overlay struct {
 	fontLarge uintptr
 	fontSmall uintptr
 
-	visible bool
-	running bool
-	mu      sync.RWMutex
+	visible  bool
+	running  bool
+	dragMode bool // When true, overlay can be dragged
+	mu       sync.RWMutex
 
 	currentMetrics *models.Metrics
 	metricsMu      sync.RWMutex
@@ -236,6 +259,38 @@ func (o *Overlay) Hide() {
 	}
 }
 
+// ToggleDragMode toggles the drag mode for repositioning overlay.
+func (o *Overlay) ToggleDragMode() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	o.dragMode = !o.dragMode
+
+	if o.hwnd != 0 {
+		// Get current extended style
+		style, _, _ := procGetWindowLongW.Call(o.hwnd, uintptr(GWL_EXSTYLE))
+
+		if o.dragMode {
+			// Remove WS_EX_TRANSPARENT to allow mouse interaction
+			style = style &^ WS_EX_TRANSPARENT
+		} else {
+			// Add WS_EX_TRANSPARENT to make click-through
+			style = style | WS_EX_TRANSPARENT
+		}
+
+		procSetWindowLongW.Call(o.hwnd, uintptr(GWL_EXSTYLE), style)
+	}
+
+	return o.dragMode
+}
+
+// IsDragMode returns whether drag mode is active.
+func (o *Overlay) IsDragMode() bool {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.dragMode
+}
+
 // IsVisible returns whether the overlay is visible.
 func (o *Overlay) IsVisible() bool {
 	o.mu.RLock()
@@ -281,6 +336,7 @@ func (o *Overlay) run() {
 
 	windowName, _ := syscall.UTF16PtrFromString("EREZMonitor Overlay")
 
+	// WS_EX_TRANSPARENT makes overlay click-through (doesn't intercept mouse)
 	exStyle := uintptr(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT)
 	style := uintptr(WS_POPUP)
 
@@ -332,25 +388,8 @@ func (o *Overlay) run() {
 
 	procSetTimer.Call(hwnd, 1, 500, 0)
 
-	metricsCh := make(chan *models.Metrics, 1)
-	o.collector.Subscribe(metricsCh)
-	defer o.collector.Unsubscribe(metricsCh)
-
-	go func() {
-		for {
-			select {
-			case <-o.stopCh:
-				return
-			case m := <-metricsCh:
-				o.metricsMu.Lock()
-				o.currentMetrics = m
-				o.metricsMu.Unlock()
-				if o.hwnd != 0 {
-					procInvalidateRect.Call(o.hwnd, 0, 1)
-				}
-			}
-		}
-	}()
+	// Don't use channel subscription - just poll directly in WM_TIMER
+	// This avoids any blocking issues with channels
 
 	var msg OverlayMSG
 	for {
@@ -385,10 +424,23 @@ func overlayWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		return 0
 
 	case WM_TIMER:
-		if globalOverlay != nil && globalOverlay.hwnd != 0 {
+		// Timer fires every 500ms - just repaint, metrics fetched in paint()
+		if globalOverlay != nil && globalOverlay.hwnd != 0 && globalOverlay.visible {
 			procInvalidateRect.Call(hwnd, 0, 1)
 		}
 		return 0
+
+	case WM_NCHITTEST:
+		// Only allow dragging in drag mode
+		if globalOverlay != nil && globalOverlay.dragMode {
+			ret, _, _ := procDefWindowProcW.Call(hwnd, msg, wParam, lParam)
+			if ret == 1 { // HTCLIENT
+				return HTCAPTION
+			}
+			return ret
+		}
+		// Not in drag mode - pass through
+		break
 
 	case WM_DESTROY:
 		procPostQuitMessage.Call(0)
@@ -429,9 +481,11 @@ func (o *Overlay) paint(hwnd uintptr) {
 	var ps PAINTSTRUCT
 	hdc, _, _ := procBeginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 
-	o.metricsMu.RLock()
-	metrics := o.currentMetrics
-	o.metricsMu.RUnlock()
+	// Get metrics directly from collector - no locks
+	var metrics *models.Metrics
+	if o.collector != nil {
+		metrics = o.collector.GetLatest()
+	}
 
 	// Main background
 	bgBrush, _, _ := procCreateSolidBrush.Call(COLOR_BG_DARK)
@@ -439,11 +493,34 @@ func (o *Overlay) paint(hwnd uintptr) {
 	procFillRect.Call(hdc, uintptr(unsafe.Pointer(&rect)), bgBrush)
 	procDeleteObject.Call(bgBrush)
 
-	// Left accent bar
-	accentBrush, _, _ := procCreateSolidBrush.Call(COLOR_GREEN)
+	// Left accent bar - orange when in drag mode, green otherwise
+	o.mu.RLock()
+	isDragMode := o.dragMode
+	o.mu.RUnlock()
+	
+	accentColor := uintptr(COLOR_GREEN)
+	if isDragMode {
+		accentColor = uintptr(0x0099FF) // Orange color (BGR format)
+	}
+	accentBrush, _, _ := procCreateSolidBrush.Call(accentColor)
 	accentRect := RECT{Left: 0, Top: 0, Right: 3, Bottom: o.height}
 	procFillRect.Call(hdc, uintptr(unsafe.Pointer(&accentRect)), accentBrush)
 	procDeleteObject.Call(accentBrush)
+	
+	// If in drag mode, also draw a border around the overlay
+	if isDragMode {
+		borderBrush, _, _ := procCreateSolidBrush.Call(0x0099FF) // Orange
+		// Top border
+		topRect := RECT{Left: 0, Top: 0, Right: o.width, Bottom: 2}
+		procFillRect.Call(hdc, uintptr(unsafe.Pointer(&topRect)), borderBrush)
+		// Bottom border
+		bottomRect := RECT{Left: 0, Top: o.height - 2, Right: o.width, Bottom: o.height}
+		procFillRect.Call(hdc, uintptr(unsafe.Pointer(&bottomRect)), borderBrush)
+		// Right border
+		rightRect := RECT{Left: o.width - 2, Top: 0, Right: o.width, Bottom: o.height}
+		procFillRect.Call(hdc, uintptr(unsafe.Pointer(&rightRect)), borderBrush)
+		procDeleteObject.Call(borderBrush)
+	}
 
 	procSetBkMode.Call(hdc, TRANSPARENT)
 
@@ -500,21 +577,6 @@ func (o *Overlay) paint(hwnd uintptr) {
 				o.drawText(hdc, fmt.Sprintf("%d°C", metrics.GPU.TemperatureC), infoX+20, y+2)
 			}
 			y += lineHeight
-
-			// VRAM on same style
-			if metrics.GPU.VRAMTotalMB > 0 {
-				procSelectObject.Call(hdc, o.fontSmall)
-				procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
-				o.drawText(hdc, "VRAM", labelX, y+2)
-
-				vramPercent := float64(metrics.GPU.VRAMUsedMB) / float64(metrics.GPU.VRAMTotalMB) * 100
-				procSetTextColor.Call(hdc, getValueColor(vramPercent))
-				o.drawText(hdc, fmt.Sprintf("%.0f%%", vramPercent), valueX+5, y+2)
-
-				procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
-				o.drawText(hdc, fmt.Sprintf("%dM", metrics.GPU.VRAMUsedMB), infoX, y+2)
-				y += lineHeight
-			}
 		}
 
 		// Separator line

@@ -9,7 +9,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sync"
@@ -160,6 +159,9 @@ func (app *Application) run(trayOnly bool) {
 		return
 	}
 
+	// Log system information
+	app.logSystemInfo()
+
 	// Start alerter
 	if err := app.alerter.Start(app.ctx); err != nil {
 		app.log.Errorf("Failed to start alerter: %v", err)
@@ -189,6 +191,7 @@ func (app *Application) run(trayOnly bool) {
 	app.tray.SetCallbacks(
 		app.onShowDetails,
 		app.onToggleOverlay,
+		app.onMoveOverlay,
 		app.onSettings,
 		app.onExportLogs,
 		app.onQuit,
@@ -236,18 +239,29 @@ func (app *Application) shutdown() {
 		// Cancel context to stop all goroutines
 		app.cancel()
 
-		// Stop components in reverse order
-		if app.overlay != nil {
-			app.overlay.Stop()
-		}
-		if app.hotkeys != nil {
-			app.hotkeys.Stop()
-		}
-		if app.alerter != nil {
-			app.alerter.Stop()
-		}
-		if app.collector != nil {
-			app.collector.Stop()
+		// Stop components in reverse order with timeouts
+		done := make(chan struct{})
+		go func() {
+			if app.overlay != nil {
+				app.overlay.Stop()
+			}
+			if app.hotkeys != nil {
+				app.hotkeys.Stop()
+			}
+			if app.alerter != nil {
+				app.alerter.Stop()
+			}
+			if app.collector != nil {
+				app.collector.Stop()
+			}
+			close(done)
+		}()
+
+		// Wait max 2 seconds for graceful shutdown
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			app.log.Warn("Shutdown timeout, forcing exit")
 		}
 
 		// Save configuration
@@ -266,6 +280,12 @@ func (app *Application) shutdown() {
 		if app.tray != nil {
 			app.tray.Quit()
 		}
+
+		// Force exit after a short delay
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			os.Exit(0)
+		}()
 	})
 }
 
@@ -310,16 +330,56 @@ func (app *Application) onToggleOverlay() {
 	}
 }
 
+// onMoveOverlay is called when "Move Overlay" is clicked.
+func (app *Application) onMoveOverlay() {
+	if !app.config.Overlay.Enabled {
+		app.log.Warn("Cannot move overlay: overlay is disabled")
+		app.tray.ShowNotification("EREZMonitor", "Enable overlay first to move it")
+		return
+	}
+	
+	isDragMode := app.overlay.ToggleDragMode()
+	if isDragMode {
+		app.log.Info("Overlay drag mode enabled - drag to reposition, click 'Move Overlay' again to lock")
+		app.tray.ShowNotification("EREZMonitor", "Drag mode ON - drag overlay to reposition, then click 'Move Overlay' to lock")
+	} else {
+		app.log.Info("Overlay drag mode disabled - position locked")
+		app.tray.ShowNotification("EREZMonitor", "Drag mode OFF - overlay position locked")
+	}
+}
+
 // onSettings is called when "Settings" is clicked.
 func (app *Application) onSettings() {
 	app.log.Info("Settings clicked")
-	// Open config file location
-	configPath, _ := config.GetDefaultConfigPath()
-	app.log.Infof("Config file: %s", configPath)
 
-	// Open folder in explorer
-	configDir := filepath.Dir(configPath)
-	exec.Command("explorer", configDir).Start()
+	// Open settings window in a separate goroutine
+	go func() {
+		settingsWnd := ui.NewSettingsWindow(app.config, app.configMgr)
+		
+		// Set callbacks for live updates
+		settingsWnd.SetCallbacks(
+			// onOverlayToggle
+			func(enabled bool) {
+				if enabled {
+					if err := app.overlay.Start(); err != nil {
+						app.log.Errorf("Failed to start overlay: %v", err)
+						return
+					}
+					app.overlay.Show()
+					app.log.Info("Overlay enabled via settings")
+				} else {
+					app.overlay.Hide()
+					app.log.Info("Overlay disabled via settings")
+				}
+			},
+			// onApply - for other settings
+			func() {
+				app.log.Info("Settings applied")
+			},
+		)
+		
+		settingsWnd.Show()
+	}()
 }
 
 // onExportLogs is called when "Export Logs" is clicked.
@@ -373,4 +433,24 @@ func (app *Application) onAutostart() bool {
 	}
 
 	return enabled
+}
+
+// logSystemInfo logs detected hardware information.
+func (app *Application) logSystemInfo() {
+	info := app.collector.GetSystemInfo()
+	if info == nil {
+		return
+	}
+
+	app.log.Info("=== System Hardware Detected ===")
+	if info.CPUModel != "" {
+		app.log.Infof("CPU: %s (%d cores, %d threads)", info.CPUModel, info.CPUCores, info.CPUThreads)
+	}
+	if info.TotalRAM > 0 {
+		app.log.Infof("RAM: %d MB (%.1f GB)", info.TotalRAM, float64(info.TotalRAM)/1024)
+	}
+	if info.GPUName != "" {
+		app.log.Infof("GPU: %s", info.GPUName)
+	}
+	app.log.Info("================================")
 }
