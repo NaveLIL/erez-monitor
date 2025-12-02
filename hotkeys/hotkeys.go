@@ -194,8 +194,9 @@ func (m *Manager) messageLoop(ctx context.Context) {
 					}
 				}
 			} else {
-				// No message, sleep briefly to avoid busy loop
-				time.Sleep(5 * time.Millisecond)
+				// No message, sleep to avoid busy loop
+				// 50ms = 20 checks per second - more than enough for hotkeys
+				time.Sleep(50 * time.Millisecond)
 			}
 		}
 	}

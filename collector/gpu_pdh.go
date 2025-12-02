@@ -204,7 +204,8 @@ func (c *PDHGPUCollector) detectGPU() (string, uint64, error) {
 
 // backgroundUpdate updates GPU metrics using PDH.
 func (c *PDHGPUCollector) backgroundUpdate() {
-	ticker := time.NewTicker(500 * time.Millisecond)
+	// Update every second instead of 500ms to reduce CPU overhead
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	for {

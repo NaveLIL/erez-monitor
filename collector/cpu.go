@@ -18,8 +18,9 @@ type CPUInfo struct {
 
 // CPUCollector collects CPU metrics.
 type CPUCollector struct {
-	info     *CPUInfo
-	infoOnce sync.Once
+	info            *CPUInfo
+	infoOnce        sync.Once
+	cachedFrequency uint32
 }
 
 // NewCPUCollector creates a new CPU collector.
@@ -37,20 +38,17 @@ func (c *CPUCollector) Collect() models.CPUMetrics {
 		metrics.UsagePercent = percentages[0]
 	}
 
-	// Get per-core CPU usage
-	perCore, err := cpu.Percent(0, true)
-	if err == nil {
-		metrics.PerCorePercent = perCore
-	}
+	// Get per-core CPU usage - skip this as it's expensive and rarely shown
+	// perCore, err := cpu.Percent(0, true)
+	// if err == nil {
+	// 	metrics.PerCorePercent = perCore
+	// }
 
-	// Get CPU frequency
-	freqs, err := cpu.Info()
-	if err == nil && len(freqs) > 0 {
-		metrics.FrequencyMHz = uint32(freqs[0].Mhz)
+	// Use cached frequency from GetInfo() instead of calling every time
+	info := c.GetInfo()
+	if info != nil {
+		metrics.FrequencyMHz = c.cachedFrequency
 	}
-
-	// Get CPU temperature via WMI (Windows-specific)
-	metrics.Temperature = c.getTemperature()
 
 	return metrics
 }
@@ -87,6 +85,12 @@ func (c *CPUCollector) GetInfo() *CPUInfo {
 		logical, err := cpu.Counts(true)
 		if err == nil {
 			c.info.Threads = logical
+		}
+
+		// Cache frequency
+		freqs, err := cpu.Info()
+		if err == nil && len(freqs) > 0 {
+			c.cachedFrequency = uint32(freqs[0].Mhz)
 		}
 	})
 

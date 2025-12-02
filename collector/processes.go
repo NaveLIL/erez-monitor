@@ -54,6 +54,7 @@ func (c *ProcessCollector) Collect() []models.ProcessInfo {
 }
 
 // getProcessInfo extracts information from a process.
+// Optimized: only gets essential info to reduce CPU overhead.
 func (c *ProcessCollector) getProcessInfo(p *process.Process) *models.ProcessInfo {
 	name, err := p.Name()
 	if err != nil {
@@ -70,35 +71,20 @@ func (c *ProcessCollector) getProcessInfo(p *process.Process) *models.ProcessInf
 		PID:  p.Pid,
 	}
 
-	// Get CPU percent
+	// Get CPU percent - this is the main metric we need
 	cpuPercent, err := p.CPUPercent()
 	if err == nil {
 		info.CPUPercent = cpuPercent
 	}
 
-	// Get memory info
+	// Get memory info - lightweight call
 	memInfo, err := p.MemoryInfo()
 	if err == nil && memInfo != nil {
 		info.MemoryMB = memInfo.RSS / (1024 * 1024)
 	}
 
-	// Get memory percent
-	memPercent, err := p.MemoryPercent()
-	if err == nil {
-		info.MemoryPercent = float64(memPercent)
-	}
-
-	// Get thread count
-	threads, err := p.NumThreads()
-	if err == nil {
-		info.Threads = threads
-	}
-
-	// Get status
-	status, err := p.Status()
-	if err == nil && len(status) > 0 {
-		info.Status = status[0]
-	}
+	// Skip expensive calls (NumThreads, Status, MemoryPercent)
+	// to reduce CPU overhead significantly
 
 	return info
 }
