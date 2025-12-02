@@ -17,6 +17,7 @@ type HotkeyID int
 const (
 	HotkeyShowWindow HotkeyID = iota + 1
 	HotkeyToggleOverlay
+	HotkeyMoveOverlay
 )
 
 // HotkeyHandler is a function that handles a hotkey press.
@@ -77,9 +78,11 @@ func (m *Manager) registerInternal(id HotkeyID, hotkey string, handler HotkeyHan
 		return nil
 	}
 
+	m.log.Infof("Registering hotkey: %s (modifiers=%d, vk=%d)", hotkey, modifiers, vk)
+
 	err := utils.RegisterHotKey(0, int(id), modifiers, vk)
 	if err != nil {
-		m.log.Warnf("Failed to register hotkey %s: %v", hotkey, err)
+		m.log.Errorf("RegisterHotKey failed for %s: %v", hotkey, err)
 		return err
 	}
 
@@ -164,11 +167,10 @@ func (m *Manager) messageLoop(ctx context.Context) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-
 	msg := &utils.MSG{}
 	for {
+		// Use GetMessage with timeout simulation via select
+		// GetMessage blocks until a message is available
 		select {
 		case <-ctx.Done():
 			return
@@ -176,11 +178,13 @@ func (m *Manager) messageLoop(ctx context.Context) {
 			// Register hotkey in this thread
 			err := m.registerInternal(reg.id, reg.hotkey, reg.handler)
 			reg.resultCh <- err
-		case <-ticker.C:
-			// Check for messages periodically
-			for utils.PeekMessage(msg, 0, 0, 0, 1) { // PM_REMOVE = 1
+		default:
+			// Check for messages - use GetMessage which properly waits
+			// But we need to make it non-blocking for ctx.Done() check
+			if utils.PeekMessage(msg, 0, 0, 0, 1) { // PM_REMOVE = 1
 				if msg.Message == utils.WM_HOTKEY {
 					id := HotkeyID(msg.WParam)
+					m.log.Infof("Hotkey pressed: ID=%d", id)
 					m.mu.RLock()
 					handler, exists := m.handlers[id]
 					m.mu.RUnlock()
@@ -189,18 +193,25 @@ func (m *Manager) messageLoop(ctx context.Context) {
 						go handler() // Run handler in separate goroutine
 					}
 				}
+			} else {
+				// No message, sleep briefly to avoid busy loop
+				time.Sleep(5 * time.Millisecond)
 			}
 		}
 	}
 }
 
 // RegisterDefaults registers the default hotkeys.
-func (m *Manager) RegisterDefaults(showWindow, toggleOverlay string, onShowWindow, onToggleOverlay func()) {
+func (m *Manager) RegisterDefaults(showWindow, toggleOverlay, moveOverlay string, onShowWindow, onToggleOverlay, onMoveOverlay func()) {
 	if showWindow != "" && onShowWindow != nil {
 		m.Register(HotkeyShowWindow, showWindow, onShowWindow)
 	}
 
 	if toggleOverlay != "" && onToggleOverlay != nil {
 		m.Register(HotkeyToggleOverlay, toggleOverlay, onToggleOverlay)
+	}
+
+	if moveOverlay != "" && onMoveOverlay != nil {
+		m.Register(HotkeyMoveOverlay, moveOverlay, onMoveOverlay)
 	}
 }

@@ -71,6 +71,8 @@ overlay:
   text_color: "#FFFFFF"
   # Hotkey to toggle overlay
   hotkey: "Ctrl+Shift+O"
+  # Hotkey to toggle overlay drag mode
+  move_hotkey: "Ctrl+Shift+P"
 
 logging:
   # Log level: "debug", "info", "warn", "error"

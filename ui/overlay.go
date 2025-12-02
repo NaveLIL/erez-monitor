@@ -31,6 +31,7 @@ var (
 	procDestroyWindow           = user32.NewProc("DestroyWindow")
 	procSetLayeredWindowAttribs = user32.NewProc("SetLayeredWindowAttributes")
 	procInvalidateRect          = user32.NewProc("InvalidateRect")
+	procRedrawWindow            = user32.NewProc("RedrawWindow")
 	procBeginPaint              = user32.NewProc("BeginPaint")
 	procEndPaint                = user32.NewProc("EndPaint")
 	procFillRect                = user32.NewProc("FillRect")
@@ -93,6 +94,12 @@ const (
 	TRANSPARENT = 1
 	CS_HREDRAW  = 0x0002
 	CS_VREDRAW  = 0x0001
+
+	// RedrawWindow flags
+	RDW_INVALIDATE = 0x0001
+	RDW_UPDATENOW  = 0x0100
+	RDW_ERASE      = 0x0004
+	RDW_FRAME      = 0x0400
 )
 
 // Color constants (BGR format)
@@ -244,11 +251,34 @@ func (o *Overlay) Toggle() {
 // Show shows the overlay.
 func (o *Overlay) Show() {
 	o.mu.Lock()
-	defer o.mu.Unlock()
-
 	o.visible = true
-	if o.hwnd != 0 {
-		procShowWindow.Call(o.hwnd, SW_SHOW)
+	hwnd := o.hwnd
+	opacity := o.config.Opacity
+	o.mu.Unlock()
+
+	if hwnd != 0 {
+		// Re-apply layered window style first
+		style, _, _ := procGetWindowLongW.Call(hwnd, GWL_EXSTYLE)
+		style = style | WS_EX_LAYERED
+		procSetWindowLongW.Call(hwnd, GWL_EXSTYLE, style)
+
+		// Re-apply opacity
+		alpha := byte(255 * opacity)
+		if alpha < 80 {
+			alpha = 80
+		}
+		if alpha > 220 {
+			alpha = 220
+		}
+		procSetLayeredWindowAttribs.Call(hwnd, 0, uintptr(alpha), LWA_ALPHA)
+
+		procShowWindow.Call(hwnd, SW_SHOW)
+
+		// Force immediate full repaint
+		procRedrawWindow.Call(hwnd, 0, 0, RDW_INVALIDATE|RDW_UPDATENOW|RDW_ERASE|RDW_FRAME)
+
+		// Also trigger a timer message to force paint
+		procPostMessageW.Call(hwnd, WM_TIMER, 1, 0)
 	}
 }
 
@@ -462,8 +492,13 @@ func overlayWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 
 	case WM_TIMER:
 		// Timer fires every 500ms - just repaint, metrics fetched in paint()
-		if globalOverlay != nil && globalOverlay.hwnd != 0 && globalOverlay.visible {
-			procInvalidateRect.Call(hwnd, 0, 1)
+		if globalOverlay != nil && globalOverlay.hwnd != 0 {
+			globalOverlay.mu.RLock()
+			visible := globalOverlay.visible
+			globalOverlay.mu.RUnlock()
+			if visible {
+				procInvalidateRect.Call(hwnd, 0, 1)
+			}
 		}
 		return 0
 
@@ -517,6 +552,11 @@ func getTempColor(temp uint32) uintptr {
 func (o *Overlay) paint(hwnd uintptr) {
 	var ps PAINTSTRUCT
 	hdc, _, _ := procBeginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
+
+	if hdc == 0 {
+		procEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
+		return
+	}
 
 	// Get metrics directly from collector - no locks
 	var metrics *models.Metrics

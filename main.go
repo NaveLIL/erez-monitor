@@ -202,12 +202,18 @@ func (app *Application) run(trayOnly bool) {
 	if err := app.hotkeys.Start(app.ctx); err != nil {
 		app.log.Warnf("Failed to start hotkey manager: %v", err)
 	} else {
+		// Log hotkey config values
+		app.log.Infof("Hotkey config - UI: %s, Overlay: %s, Move: %s",
+			app.config.UI.Hotkey, app.config.Overlay.Hotkey, app.config.Overlay.MoveHotkey)
+
 		// Register hotkeys
 		app.hotkeys.RegisterDefaults(
 			app.config.UI.Hotkey,
 			app.config.Overlay.Hotkey,
+			app.config.Overlay.MoveHotkey,
 			app.onShowDetails,
 			app.onToggleOverlay,
+			app.onMoveOverlay,
 		)
 	}
 

@@ -110,6 +110,8 @@ type OverlayConfig struct {
 	TextColor string `mapstructure:"text_color"`
 	// Hotkey is the hotkey to toggle the overlay.
 	Hotkey string `mapstructure:"hotkey"`
+	// MoveHotkey is the hotkey to toggle overlay drag mode.
+	MoveHotkey string `mapstructure:"move_hotkey"`
 }
 
 // LoggingConfig holds logging-related settings.
@@ -313,6 +315,7 @@ func (m *Manager) setDefaults() {
 	m.viper.SetDefault("overlay.background_color", "#000000")
 	m.viper.SetDefault("overlay.text_color", "#FFFFFF")
 	m.viper.SetDefault("overlay.hotkey", "Ctrl+Shift+O")
+	m.viper.SetDefault("overlay.move_hotkey", "Ctrl+Shift+P")
 
 	// Logging defaults
 	m.viper.SetDefault("logging.level", "info")
