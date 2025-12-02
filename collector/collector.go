@@ -45,6 +45,7 @@ type Collector struct {
 	diskCollector    *DiskCollector
 	networkCollector *NetworkCollector
 	processCollector *ProcessCollector
+	pingCollector    *PingCollector
 
 	// State
 	running bool
@@ -75,6 +76,7 @@ func New(cfg *config.MonitoringConfig) *Collector {
 	c.diskCollector = NewDiskCollector()
 	c.networkCollector = NewNetworkCollector()
 	c.processCollector = NewProcessCollector(cfg.TopProcessCount)
+	c.pingCollector = NewPingCollector()
 
 	if cfg.EnableGPU {
 		c.gpuCollector = NewGPUCollector()
@@ -109,6 +111,15 @@ func (c *Collector) Start(ctx context.Context) error {
 	// Initialize network collector with first reading
 	c.networkCollector.Init()
 
+	// Initialize ping collector
+	if c.pingCollector != nil {
+		if err := c.pingCollector.Init(); err != nil {
+			c.log.Warnf("Ping monitoring unavailable: %v", err)
+		} else {
+			c.log.Info("Ping monitoring initialized")
+		}
+	}
+
 	// Initial collection
 	c.collect()
 
@@ -140,6 +151,11 @@ func (c *Collector) Stop() {
 	// Cleanup GPU
 	if c.gpuCollector != nil {
 		c.gpuCollector.Shutdown()
+	}
+
+	// Cleanup ping collector
+	if c.pingCollector != nil {
+		c.pingCollector.Shutdown()
 	}
 
 	c.log.Info("Collector stopped")
@@ -240,6 +256,15 @@ func (c *Collector) collect() {
 	case <-time.After(800 * time.Millisecond):
 		// Timeout - use partial metrics
 		c.log.Debug("Collection timeout, using partial metrics")
+	}
+
+	// Add ping data (non-blocking, reads cached values)
+	if c.pingCollector != nil && c.pingCollector.IsInitialized() {
+		latency, target := c.pingCollector.GetBestLatency()
+		if latency > 0 && latency < time.Hour {
+			metrics.Network.PingMs = float64(latency.Milliseconds())
+			metrics.Network.PingTarget = target
+		}
 	}
 
 	// Store metrics

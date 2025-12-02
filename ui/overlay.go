@@ -196,7 +196,7 @@ func NewOverlay(cfg *config.OverlayConfig, coll *collector.Collector) *Overlay {
 		collector: coll,
 		stopCh:    make(chan struct{}),
 		width:     220,
-		height:    155,
+		height:    175,
 	}
 }
 
@@ -549,6 +549,17 @@ func getTempColor(temp uint32) uintptr {
 	return COLOR_RED
 }
 
+func getPingColor(pingMs float64) uintptr {
+	if pingMs < 30 {
+		return COLOR_GREEN
+	} else if pingMs < 60 {
+		return COLOR_YELLOW
+	} else if pingMs < 100 {
+		return COLOR_ORANGE
+	}
+	return COLOR_RED
+}
+
 func (o *Overlay) paint(hwnd uintptr) {
 	var ps PAINTSTRUCT
 	hdc, _, _ := procBeginPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
@@ -690,6 +701,20 @@ func (o *Overlay) paint(hwnd uintptr) {
 			o.drawText(hdc, dlText, valueX-5, y)
 			o.drawText(hdc, ulText, infoX+15, y)
 			y += lineHeight - 4
+
+			// === Ping ===
+			if metrics.Network.PingMs > 0 {
+				procSelectObject.Call(hdc, o.fontSmall)
+				procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
+				o.drawText(hdc, "PING", labelX, y)
+
+				procSetTextColor.Call(hdc, getPingColor(metrics.Network.PingMs))
+				o.drawText(hdc, fmt.Sprintf("%.0fms", metrics.Network.PingMs), valueX-5, y)
+
+				procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
+				o.drawText(hdc, metrics.Network.PingTarget, infoX, y)
+				y += lineHeight - 4
+			}
 		}
 
 		// === Disk I/O ===

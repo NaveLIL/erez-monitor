@@ -108,6 +108,10 @@ type NetworkMetrics struct {
 	PacketsRecv uint64 `json:"packets_recv"`
 	// PacketsSent is the number of packets sent per second.
 	PacketsSent uint64 `json:"packets_sent"`
+	// PingMs is the best network latency in milliseconds.
+	PingMs float64 `json:"ping_ms"`
+	// PingTarget is the name of the ping target with best latency.
+	PingTarget string `json:"ping_target"`
 	// Interfaces contains per-interface metrics.
 	Interfaces []InterfaceInfo `json:"interfaces"`
 }
