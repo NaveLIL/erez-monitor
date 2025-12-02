@@ -130,53 +130,47 @@ func (t *TrayUI) onExit() {
 // handleMenuEvents handles menu item clicks.
 func (t *TrayUI) handleMenuEvents() {
 	for {
-		t.mu.Lock()
-		quitting := t.quitting
-		t.mu.Unlock()
-
-		if quitting {
-			return
-		}
-
 		select {
 		case <-t.mShowDetails.ClickedCh:
 			if t.onShowDetails != nil {
-				t.onShowDetails()
+				go t.onShowDetails() // Run in goroutine to avoid blocking
 			}
 
 		case <-t.mToggleOverlay.ClickedCh:
 			if t.onToggleOverlay != nil {
-				t.onToggleOverlay()
+				go t.onToggleOverlay()
 			}
 
 		case <-t.mMoveOverlay.ClickedCh:
 			if t.onMoveOverlay != nil {
-				t.onMoveOverlay()
+				go t.onMoveOverlay()
 			}
 
 		case <-t.mSettings.ClickedCh:
 			if t.onSettings != nil {
-				t.onSettings()
+				go t.onSettings()
 			}
 
 		case <-t.mExportLogs.ClickedCh:
 			if t.onExportLogs != nil {
-				t.onExportLogs()
+				go t.onExportLogs()
 			}
 
 		case <-t.mAutostart.ClickedCh:
 			if t.onAutostart != nil {
-				enabled := t.onAutostart()
-				if enabled {
-					t.mAutostart.Check()
-				} else {
-					t.mAutostart.Uncheck()
-				}
+				go func() {
+					enabled := t.onAutostart()
+					if enabled {
+						t.mAutostart.Check()
+					} else {
+						t.mAutostart.Uncheck()
+					}
+				}()
 			}
 
 		case <-t.mQuit.ClickedCh:
 			if t.onQuit != nil {
-				t.onQuit()
+				go t.onQuit()
 			}
 			return
 		}

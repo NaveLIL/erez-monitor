@@ -54,6 +54,15 @@ func New() *Manager {
 // Register registers a global hotkey.
 // This sends the registration to the message loop goroutine.
 func (m *Manager) Register(id HotkeyID, hotkey string, handler HotkeyHandler) error {
+	m.mu.RLock()
+	running := m.running
+	m.mu.RUnlock()
+
+	if !running {
+		m.log.Warnf("Cannot register hotkey %s: manager not running", hotkey)
+		return nil
+	}
+
 	reg := hotkeyRegistration{
 		id:       id,
 		hotkey:   hotkey,
@@ -61,10 +70,18 @@ func (m *Manager) Register(id HotkeyID, hotkey string, handler HotkeyHandler) er
 		resultCh: make(chan error, 1),
 	}
 
+	// Send registration with timeout
 	select {
 	case m.registerCh <- reg:
-		return <-reg.resultCh
-	default:
+		// Wait for result with timeout
+		select {
+		case err := <-reg.resultCh:
+			return err
+		case <-time.After(2 * time.Second):
+			m.log.Warnf("Timeout registering hotkey: %s", hotkey)
+			return nil
+		}
+	case <-time.After(1 * time.Second):
 		m.log.Warnf("Failed to queue hotkey registration: %s", hotkey)
 		return nil
 	}
@@ -122,6 +139,9 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	m.wg.Add(1)
 	go m.messageLoop(ctx)
+
+	// Give message loop time to start and lock to OS thread
+	time.Sleep(100 * time.Millisecond)
 
 	m.log.Info("Hotkey manager started")
 	return nil
