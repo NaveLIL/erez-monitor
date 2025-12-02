@@ -49,6 +49,7 @@ var (
 	procGetAsyncKeyState        = user32.NewProc("GetAsyncKeyState")
 	procGetWindowLongW          = user32.NewProc("GetWindowLongW")
 	procSetWindowLongW          = user32.NewProc("SetWindowLongW")
+	procGetWindowRect           = user32.NewProc("GetWindowRect")
 )
 
 // Virtual key codes
@@ -56,9 +57,9 @@ const (
 	VK_CONTROL = 0x11
 )
 
-// Window long index
-const (
-	GWL_EXSTYLE = -20
+// Window long index (use uintptr-compatible value for -20)
+var (
+	GWL_EXSTYLE = uintptr(0xFFFFFFEC) // -20 in unsigned 32-bit
 )
 
 // Window style constants
@@ -75,16 +76,16 @@ const (
 
 	LWA_ALPHA = 0x00000002
 
-	WM_DESTROY      = 0x0002
-	WM_PAINT        = 0x000F
-	WM_TIMER        = 0x0113
-	WM_CLOSE        = 0x0010
-	WM_NCHITTEST    = 0x0084
-	WM_LBUTTONDOWN  = 0x0201
-	WM_MOUSEMOVE    = 0x0200
-	WM_LBUTTONUP    = 0x0202
+	WM_DESTROY     = 0x0002
+	WM_PAINT       = 0x000F
+	WM_TIMER       = 0x0113
+	WM_CLOSE       = 0x0010
+	WM_NCHITTEST   = 0x0084
+	WM_LBUTTONDOWN = 0x0201
+	WM_MOUSEMOVE   = 0x0200
+	WM_LBUTTONUP   = 0x0202
 
-	HTCAPTION   = 2
+	HTCAPTION     = 2
 	HTTRANSPARENT = -1
 
 	MK_CONTROL = 0x0008
@@ -173,6 +174,9 @@ type Overlay struct {
 
 	width  int32
 	height int32
+
+	// Callback for position changes (called when drag mode ends)
+	onPositionChanged func(x, y int)
 }
 
 // Global overlay instance for window proc callback
@@ -268,7 +272,7 @@ func (o *Overlay) ToggleDragMode() bool {
 
 	if o.hwnd != 0 {
 		// Get current extended style
-		style, _, _ := procGetWindowLongW.Call(o.hwnd, uintptr(GWL_EXSTYLE))
+		style, _, _ := procGetWindowLongW.Call(o.hwnd, GWL_EXSTYLE)
 
 		if o.dragMode {
 			// Remove WS_EX_TRANSPARENT to allow mouse interaction
@@ -278,7 +282,13 @@ func (o *Overlay) ToggleDragMode() bool {
 			style = style | WS_EX_TRANSPARENT
 		}
 
-		procSetWindowLongW.Call(o.hwnd, uintptr(GWL_EXSTYLE), style)
+		procSetWindowLongW.Call(o.hwnd, GWL_EXSTYLE, style)
+	}
+
+	// If turning off drag mode, save position
+	if !o.dragMode && o.onPositionChanged != nil && o.hwnd != 0 {
+		x, y := o.getWindowPosition()
+		go o.onPositionChanged(x, y)
 	}
 
 	return o.dragMode
@@ -289,6 +299,30 @@ func (o *Overlay) IsDragMode() bool {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	return o.dragMode
+}
+
+// SetOnPositionChanged sets the callback for position changes.
+func (o *Overlay) SetOnPositionChanged(callback func(x, y int)) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.onPositionChanged = callback
+}
+
+// getWindowPosition returns the current window position.
+func (o *Overlay) getWindowPosition() (int, int) {
+	if o.hwnd == 0 {
+		return 0, 0
+	}
+	var rect RECT
+	procGetWindowRect.Call(o.hwnd, uintptr(unsafe.Pointer(&rect)))
+	return int(rect.Left), int(rect.Top)
+}
+
+// GetPosition returns the current overlay position.
+func (o *Overlay) GetPosition() (int, int) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.getWindowPosition()
 }
 
 // IsVisible returns whether the overlay is visible.
@@ -324,6 +358,9 @@ func (o *Overlay) run() {
 	var x, y int32
 
 	switch o.config.Position {
+	case "custom":
+		// Use custom coordinates from config
+		x, y = int32(o.config.CustomX), int32(o.config.CustomY)
 	case "top-left":
 		x, y = padding, padding
 	case "bottom-left":
@@ -497,7 +534,7 @@ func (o *Overlay) paint(hwnd uintptr) {
 	o.mu.RLock()
 	isDragMode := o.dragMode
 	o.mu.RUnlock()
-	
+
 	accentColor := uintptr(COLOR_GREEN)
 	if isDragMode {
 		accentColor = uintptr(0x0099FF) // Orange color (BGR format)
@@ -506,7 +543,7 @@ func (o *Overlay) paint(hwnd uintptr) {
 	accentRect := RECT{Left: 0, Top: 0, Right: 3, Bottom: o.height}
 	procFillRect.Call(hdc, uintptr(unsafe.Pointer(&accentRect)), accentBrush)
 	procDeleteObject.Call(accentBrush)
-	
+
 	// If in drag mode, also draw a border around the overlay
 	if isDragMode {
 		borderBrush, _, _ := procCreateSolidBrush.Call(0x0099FF) // Orange
@@ -532,37 +569,41 @@ func (o *Overlay) paint(hwnd uintptr) {
 
 	if metrics != nil {
 		// === CPU ===
-		procSelectObject.Call(hdc, o.fontSmall)
-		procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
-		o.drawText(hdc, "CPU", labelX, y+2)
-
-		procSelectObject.Call(hdc, o.fontLarge)
-		procSetTextColor.Call(hdc, getValueColor(metrics.CPU.UsagePercent))
-		o.drawText(hdc, fmt.Sprintf("%.0f%%", metrics.CPU.UsagePercent), valueX, y)
-
-		if metrics.CPU.Temperature > 0 {
+		if o.config.ShowCPU {
 			procSelectObject.Call(hdc, o.fontSmall)
-			procSetTextColor.Call(hdc, getTempColor(uint32(metrics.CPU.Temperature)))
-			o.drawText(hdc, fmt.Sprintf("%.0f°C", metrics.CPU.Temperature), infoX+20, y+2)
+			procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
+			o.drawText(hdc, "CPU", labelX, y+2)
+
+			procSelectObject.Call(hdc, o.fontLarge)
+			procSetTextColor.Call(hdc, getValueColor(metrics.CPU.UsagePercent))
+			o.drawText(hdc, fmt.Sprintf("%.0f%%", metrics.CPU.UsagePercent), valueX, y)
+
+			if metrics.CPU.Temperature > 0 {
+				procSelectObject.Call(hdc, o.fontSmall)
+				procSetTextColor.Call(hdc, getTempColor(uint32(metrics.CPU.Temperature)))
+				o.drawText(hdc, fmt.Sprintf("%.0f°C", metrics.CPU.Temperature), infoX+20, y+2)
+			}
+			y += lineHeight
 		}
-		y += lineHeight
 
 		// === RAM ===
-		procSelectObject.Call(hdc, o.fontSmall)
-		procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
-		o.drawText(hdc, "RAM", labelX, y+2)
+		if o.config.ShowRAM {
+			procSelectObject.Call(hdc, o.fontSmall)
+			procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
+			o.drawText(hdc, "RAM", labelX, y+2)
 
-		procSelectObject.Call(hdc, o.fontLarge)
-		procSetTextColor.Call(hdc, getValueColor(metrics.Memory.UsedPercent))
-		o.drawText(hdc, fmt.Sprintf("%.0f%%", metrics.Memory.UsedPercent), valueX, y)
+			procSelectObject.Call(hdc, o.fontLarge)
+			procSetTextColor.Call(hdc, getValueColor(metrics.Memory.UsedPercent))
+			o.drawText(hdc, fmt.Sprintf("%.0f%%", metrics.Memory.UsedPercent), valueX, y)
 
-		procSelectObject.Call(hdc, o.fontSmall)
-		procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
-		o.drawText(hdc, fmt.Sprintf("%d/%dG", metrics.Memory.UsedMB/1024, metrics.Memory.TotalMB/1024), infoX, y+2)
-		y += lineHeight
+			procSelectObject.Call(hdc, o.fontSmall)
+			procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
+			o.drawText(hdc, fmt.Sprintf("%d/%dG", metrics.Memory.UsedMB/1024, metrics.Memory.TotalMB/1024), infoX, y+2)
+			y += lineHeight
+		}
 
 		// === GPU ===
-		if metrics.GPU.Available {
+		if o.config.ShowGPU && metrics.GPU.Available {
 			procSelectObject.Call(hdc, o.fontSmall)
 			procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
 			o.drawText(hdc, "GPU", labelX, y+2)
@@ -579,36 +620,41 @@ func (o *Overlay) paint(hwnd uintptr) {
 			y += lineHeight
 		}
 
-		// Separator line
-		sepBrush, _, _ := procCreateSolidBrush.Call(0x333333)
-		sepRect := RECT{Left: 10, Top: y, Right: o.width - 10, Bottom: y + 1}
-		procFillRect.Call(hdc, uintptr(unsafe.Pointer(&sepRect)), sepBrush)
-		procDeleteObject.Call(sepBrush)
-		y += 6
+		// Separator line (only if we have network or disk to show)
+		if o.config.ShowNet || o.config.ShowDisk {
+			sepBrush, _, _ := procCreateSolidBrush.Call(0x333333)
+			sepRect := RECT{Left: 10, Top: y, Right: o.width - 10, Bottom: y + 1}
+			procFillRect.Call(hdc, uintptr(unsafe.Pointer(&sepRect)), sepBrush)
+			procDeleteObject.Call(sepBrush)
+			y += 6
+		}
 
 		// === Network ===
-		procSelectObject.Call(hdc, o.fontSmall)
-		procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
-		o.drawText(hdc, "NET", labelX, y)
+		if o.config.ShowNet {
+			procSelectObject.Call(hdc, o.fontSmall)
+			procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
+			o.drawText(hdc, "NET", labelX, y)
 
-		procSetTextColor.Call(hdc, COLOR_CYAN)
-		var dlText, ulText string
-		if metrics.Network.DownloadKBps >= 1024 {
-			dlText = fmt.Sprintf("↓%.1fM", metrics.Network.DownloadKBps/1024)
-		} else {
-			dlText = fmt.Sprintf("↓%.0fK", metrics.Network.DownloadKBps)
+			procSetTextColor.Call(hdc, COLOR_CYAN)
+			var dlText, ulText string
+			if metrics.Network.DownloadKBps >= 1024 {
+				dlText = fmt.Sprintf("↓%.1fM", metrics.Network.DownloadKBps/1024)
+			} else {
+				dlText = fmt.Sprintf("↓%.0fK", metrics.Network.DownloadKBps)
+			}
+			if metrics.Network.UploadKBps >= 1024 {
+				ulText = fmt.Sprintf("↑%.1fM", metrics.Network.UploadKBps/1024)
+			} else {
+				ulText = fmt.Sprintf("↑%.0fK", metrics.Network.UploadKBps)
+			}
+			o.drawText(hdc, dlText, valueX-5, y)
+			o.drawText(hdc, ulText, infoX+15, y)
+			y += lineHeight - 4
 		}
-		if metrics.Network.UploadKBps >= 1024 {
-			ulText = fmt.Sprintf("↑%.1fM", metrics.Network.UploadKBps/1024)
-		} else {
-			ulText = fmt.Sprintf("↑%.0fK", metrics.Network.UploadKBps)
-		}
-		o.drawText(hdc, dlText, valueX-5, y)
-		o.drawText(hdc, ulText, infoX+15, y)
-		y += lineHeight - 4
 
 		// === Disk I/O ===
-		if metrics.Disk.ReadMBps > 0.01 || metrics.Disk.WriteMBps > 0.01 {
+		if o.config.ShowDisk && (metrics.Disk.ReadMBps > 0.01 || metrics.Disk.WriteMBps > 0.01) {
+			procSelectObject.Call(hdc, o.fontSmall)
 			procSetTextColor.Call(hdc, COLOR_TEXT_GRAY)
 			o.drawText(hdc, "DISK", labelX, y)
 

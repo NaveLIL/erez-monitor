@@ -82,8 +82,12 @@ type UIConfig struct {
 type OverlayConfig struct {
 	// Enabled enables the overlay.
 	Enabled bool `mapstructure:"enabled"`
-	// Position is the overlay position ("top-right", "top-left", "bottom-right", "bottom-left").
+	// Position is the overlay position ("top-right", "top-left", "bottom-right", "bottom-left", "custom").
 	Position string `mapstructure:"position"`
+	// CustomX is the custom X position (used when Position is "custom").
+	CustomX int `mapstructure:"custom_x"`
+	// CustomY is the custom Y position (used when Position is "custom").
+	CustomY int `mapstructure:"custom_y"`
 	// Opacity is the overlay opacity (0.0 to 1.0).
 	Opacity float64 `mapstructure:"opacity"`
 	// FontSize is the overlay font size in pixels.
@@ -96,6 +100,10 @@ type OverlayConfig struct {
 	ShowRAM bool `mapstructure:"show_ram"`
 	// ShowGPU enables GPU display in the overlay.
 	ShowGPU bool `mapstructure:"show_gpu"`
+	// ShowNet enables Network display in the overlay.
+	ShowNet bool `mapstructure:"show_net"`
+	// ShowDisk enables Disk display in the overlay.
+	ShowDisk bool `mapstructure:"show_disk"`
 	// BackgroundColor is the overlay background color.
 	BackgroundColor string `mapstructure:"background_color"`
 	// TextColor is the overlay text color.
@@ -292,12 +300,16 @@ func (m *Manager) setDefaults() {
 	// Overlay defaults
 	m.viper.SetDefault("overlay.enabled", false)
 	m.viper.SetDefault("overlay.position", "top-right")
+	m.viper.SetDefault("overlay.custom_x", 0)
+	m.viper.SetDefault("overlay.custom_y", 0)
 	m.viper.SetDefault("overlay.opacity", 0.8)
 	m.viper.SetDefault("overlay.font_size", 16)
 	m.viper.SetDefault("overlay.show_fps", true)
 	m.viper.SetDefault("overlay.show_cpu", true)
 	m.viper.SetDefault("overlay.show_ram", true)
 	m.viper.SetDefault("overlay.show_gpu", true)
+	m.viper.SetDefault("overlay.show_net", true)
+	m.viper.SetDefault("overlay.show_disk", true)
 	m.viper.SetDefault("overlay.background_color", "#000000")
 	m.viper.SetDefault("overlay.text_color", "#FFFFFF")
 	m.viper.SetDefault("overlay.hotkey", "Ctrl+Shift+O")

@@ -218,6 +218,18 @@ func (app *Application) run(trayOnly bool) {
 		}
 	}
 
+	// Set callback for overlay position changes
+	app.overlay.SetOnPositionChanged(func(x, y int) {
+		app.config.Overlay.Position = "custom"
+		app.config.Overlay.CustomX = x
+		app.config.Overlay.CustomY = y
+		if err := app.configMgr.Save(); err != nil {
+			app.log.Errorf("Failed to save overlay position: %v", err)
+		} else {
+			app.log.Infof("Overlay position saved: (%d, %d)", x, y)
+		}
+	})
+
 	// Start signal handler
 	go func() {
 		<-sigCh
@@ -337,7 +349,7 @@ func (app *Application) onMoveOverlay() {
 		app.tray.ShowNotification("EREZMonitor", "Enable overlay first to move it")
 		return
 	}
-	
+
 	isDragMode := app.overlay.ToggleDragMode()
 	if isDragMode {
 		app.log.Info("Overlay drag mode enabled - drag to reposition, click 'Move Overlay' again to lock")
@@ -355,7 +367,7 @@ func (app *Application) onSettings() {
 	// Open settings window in a separate goroutine
 	go func() {
 		settingsWnd := ui.NewSettingsWindow(app.config, app.configMgr)
-		
+
 		// Set callbacks for live updates
 		settingsWnd.SetCallbacks(
 			// onOverlayToggle
@@ -377,7 +389,7 @@ func (app *Application) onSettings() {
 				app.log.Info("Settings applied")
 			},
 		)
-		
+
 		settingsWnd.Show()
 	}()
 }
