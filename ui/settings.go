@@ -179,10 +179,10 @@ func (s *SettingsWindow) Show() {
 	s.loadSettings()
 
 	procShowWindow.Call(hwnd, SW_SHOW)
-	procUpdateWindow.Call(hwnd)
+	procInvalidateRect.Call(hwnd, 0, 1)
 
 	// Non-blocking message loop
-	var msg OverlayMSG
+	var msg MSG
 	for s.running {
 		ret, _, _ := procPeekMessageW.Call(
 			uintptr(unsafe.Pointer(&msg)),
