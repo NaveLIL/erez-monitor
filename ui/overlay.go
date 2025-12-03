@@ -59,12 +59,18 @@ var (
 	procCreatePen                  = gdi32.NewProc("CreatePen")
 	procMoveToEx                   = gdi32.NewProc("MoveToEx")
 	procLineTo                     = gdi32.NewProc("LineTo")
+	procPolyline                   = gdi32.NewProc("Polyline")
 	procRoundRect                  = gdi32.NewProc("RoundRect")
 	procGetTextExtentPoint32W      = gdi32.NewProc("GetTextExtentPoint32W")
 	procSetLayeredWindowAttributes = user32.NewProc("SetLayeredWindowAttributes")
 	procGetSystemMetrics           = user32.NewProc("GetSystemMetrics")
 	procGetWindowLongW             = user32.NewProc("GetWindowLongW")
 	procSetWindowLongW             = user32.NewProc("SetWindowLongW")
+	procCreateRoundRectRgn         = gdi32.NewProc("CreateRoundRectRgn")
+	procSetWindowRgn               = user32.NewProc("SetWindowRgn")
+	procFillRgn                    = gdi32.NewProc("FillRgn")
+	procFrameRgn                   = gdi32.NewProc("FrameRgn")
+	procRectangle                  = gdi32.NewProc("Rectangle")
 )
 
 // Window style constants
@@ -132,19 +138,33 @@ const (
 	GWL_EXSTYLE = -20
 	HTCAPTION   = 2
 
+	// History settings
+	HISTORY_SIZE     = 60 // 60 samples = 30 seconds at 500ms interval
+	SPARKLINE_WIDTH  = 60
+	SPARKLINE_HEIGHT = 16
+
 	// Colors (COLORREF: 0x00BBGGRR)
 	COLOR_BG_DARK   = 0x00282828 // Dark gray background
 	COLOR_BG_BAR    = 0x00404040 // Bar background
+	COLOR_BG_GRAPH  = 0x00353535 // Graph background
 	COLOR_TEXT      = 0x00FFFFFF // White text
 	COLOR_TEXT_GRAY = 0x00AAAAAA // Gray text
 	COLOR_ACCENT    = 0x00FF9900 // Orange accent (for CPU)
+	COLOR_CPU       = 0x0000AAFF // Orange for CPU graph
+	COLOR_RAM       = 0x0000DD00 // Green for RAM graph
+	COLOR_GPU_GRAPH = 0x00FFAA00 // Blue for GPU graph
 	COLOR_GREEN     = 0x0000AA00 // Green (for RAM)
 	COLOR_BLUE      = 0x00FF6600 // Blue (for GPU)
 	COLOR_ORANGE    = 0x000080FF // Orange warning
 	COLOR_RED       = 0x000000FF // Red critical
 	COLOR_CYAN      = 0x00FFFF00 // Cyan (for network)
 	COLOR_PURPLE    = 0x00FF00FF // Purple (for disk)
+	COLOR_GLOW      = 0x00FF9900 // Glow/border color
+	COLOR_BORDER    = 0x00505050 // Subtle border
 	TRANSPARENT     = 1          // Transparent background mode
+
+	// Corner radius for rounded window
+	CORNER_RADIUS = 12
 )
 
 // RECT structure for Windows API
@@ -208,7 +228,7 @@ func lerp(current, target, factor float64) float64 {
 	return current + (target-current)*factor
 }
 
-// getTempColor returns color based on temperature.
+// getTempColor returns color based on GPU temperature (uint32).
 func getTempColor(temp uint32) uintptr {
 	if temp >= 80 {
 		return COLOR_RED
@@ -216,6 +236,18 @@ func getTempColor(temp uint32) uintptr {
 		return COLOR_ORANGE
 	}
 	return COLOR_GREEN
+}
+
+// getCPUTempColor returns color based on CPU temperature (float64).
+func getCPUTempColor(temp float64) uintptr {
+	if temp >= 85 {
+		return COLOR_RED
+	} else if temp >= 70 {
+		return COLOR_ORANGE
+	} else if temp >= 55 {
+		return COLOR_GREEN
+	}
+	return COLOR_CYAN // Cool temperature
 }
 
 // getPingColor returns color based on ping latency.
@@ -255,14 +287,75 @@ func blendColors(color1, color2 uintptr, factor float64) uintptr {
 	return uintptr(r | (g << 8) | (b << 16))
 }
 
+// addHistorySample adds new values to history buffer
+func (o *Overlay) addHistorySample(cpu, ram, gpu float64) {
+	o.history.cpu[o.history.index] = cpu
+	o.history.ram[o.history.index] = ram
+	o.history.gpu[o.history.index] = gpu
+	o.history.index = (o.history.index + 1) % HISTORY_SIZE
+	if o.history.count < HISTORY_SIZE {
+		o.history.count++
+	}
+}
+
+// drawSparkline draws a mini line graph for the given history
+func (o *Overlay) drawSparkline(hdc uintptr, data *[HISTORY_SIZE]float64, x, y, width, height int32, color uintptr) {
+	if o.history.count < 2 {
+		return
+	}
+
+	// Draw background
+	bgBrush, _, _ := procCreateSolidBrush.Call(COLOR_BG_GRAPH)
+	rect := RECT{Left: x, Top: y, Right: x + width, Bottom: y + height}
+	procFillRect.Call(hdc, uintptr(unsafe.Pointer(&rect)), bgBrush)
+	procDeleteObject.Call(bgBrush)
+
+	// Create pen for the line
+	pen, _, _ := procCreatePen.Call(PS_SOLID, 1, color)
+	oldPen, _, _ := procSelectObject.Call(hdc, pen)
+
+	// Calculate points
+	count := o.history.count
+	if count > int(width) {
+		count = int(width)
+	}
+
+	stepX := float64(width-2) / float64(count-1)
+	startIdx := (o.history.index - count + HISTORY_SIZE) % HISTORY_SIZE
+
+	// Draw the line
+	for i := 0; i < count; i++ {
+		idx := (startIdx + i) % HISTORY_SIZE
+		value := data[idx]
+		if value > 100 {
+			value = 100
+		}
+
+		px := x + 1 + int32(float64(i)*stepX)
+		py := y + height - 2 - int32((value/100.0)*float64(height-4))
+
+		if i == 0 {
+			procMoveToEx.Call(hdc, uintptr(px), uintptr(py), 0)
+		} else {
+			procLineTo.Call(hdc, uintptr(px), uintptr(py))
+		}
+	}
+
+	procSelectObject.Call(hdc, oldPen)
+	procDeleteObject.Call(pen)
+}
+
 // Custom window messages for inter-thread communication
 const (
-	WM_APP                 = 0x8000
-	WM_OVERLAY_SHOW        = WM_APP + 1
-	WM_OVERLAY_HIDE        = WM_APP + 2
-	WM_OVERLAY_TOGGLE      = WM_APP + 3
-	WM_OVERLAY_TOGGLE_DRAG = WM_APP + 4
-	WM_OVERLAY_STOP        = WM_APP + 5
+	WM_APP                   = 0x8000
+	WM_OVERLAY_SHOW          = WM_APP + 1
+	WM_OVERLAY_HIDE          = WM_APP + 2
+	WM_OVERLAY_TOGGLE        = WM_APP + 3
+	WM_OVERLAY_TOGGLE_DRAG   = WM_APP + 4
+	WM_OVERLAY_STOP          = WM_APP + 5
+	WM_OVERLAY_SET_OPACITY   = WM_APP + 6
+	WM_OVERLAY_UPDATE_POS    = WM_APP + 7
+	WM_OVERLAY_UPDATE_CONFIG = WM_APP + 8
 )
 
 // Overlay represents a transparent overlay window with proper thread safety.
@@ -286,6 +379,9 @@ type Overlay struct {
 	// Animation state - only accessed from UI thread
 	anim animState
 
+	// History for sparklines - only accessed from UI thread
+	history historyData
+
 	// Dimensions
 	width  int32
 	height int32
@@ -307,6 +403,16 @@ type animState struct {
 	gpuCritical bool
 }
 
+// historyData stores historical values for sparkline graphs
+type historyData struct {
+	cpu    [HISTORY_SIZE]float64
+	ram    [HISTORY_SIZE]float64
+	gpu    [HISTORY_SIZE]float64
+	index  int
+	count  int
+	ticker int // counts animation frames to add new sample
+}
+
 // Global instance - ONLY used from UI thread in WndProc
 var globalOverlay *Overlay
 
@@ -317,7 +423,7 @@ func NewOverlay(cfg *config.OverlayConfig, coll *collector.Collector) *Overlay {
 		collector: coll,
 		log:       logger.Get(),
 		width:     240,
-		height:    195,
+		height:    195, // Back to normal size
 		readyCh:   make(chan struct{}),
 	}
 }
@@ -410,6 +516,51 @@ func (o *Overlay) GetPosition() (int, int) {
 	var rect RECT
 	procGetWindowRect.Call(o.hwnd, uintptr(unsafe.Pointer(&rect)))
 	return int(rect.Left), int(rect.Top)
+}
+
+// SetOpacity sets the overlay opacity (0.0 to 1.0). Safe to call from any goroutine.
+func (o *Overlay) SetOpacity(opacity float64) {
+	if o.hwnd == 0 {
+		return
+	}
+	// Clamp opacity to valid range
+	if opacity < 0.2 {
+		opacity = 0.2
+	}
+	if opacity > 1.0 {
+		opacity = 1.0
+	}
+	// Convert to 0-255 range and send via PostMessage
+	alpha := byte(opacity * 255)
+	procPostMessageW.Call(o.hwnd, WM_OVERLAY_SET_OPACITY, uintptr(alpha), 0)
+}
+
+// UpdatePosition moves overlay to a preset position. Safe to call from any goroutine.
+func (o *Overlay) UpdatePosition(position string) {
+	if o.hwnd == 0 {
+		return
+	}
+	// Encode position as wParam: 0=top-right, 1=top-left, 2=bottom-right, 3=bottom-left
+	var posCode uintptr
+	switch position {
+	case "top-left":
+		posCode = 1
+	case "bottom-right":
+		posCode = 2
+	case "bottom-left":
+		posCode = 3
+	default: // top-right
+		posCode = 0
+	}
+	procPostMessageW.Call(o.hwnd, WM_OVERLAY_UPDATE_POS, posCode, 0)
+}
+
+// UpdateConfig updates the overlay config and refreshes display. Safe to call from any goroutine.
+func (o *Overlay) UpdateConfig(cfg *config.OverlayConfig) {
+	o.config = cfg
+	if o.hwnd != 0 {
+		procPostMessageW.Call(o.hwnd, WM_OVERLAY_UPDATE_CONFIG, 0, 0)
+	}
 }
 
 // uiThread is the dedicated UI thread for overlay window.
@@ -641,6 +792,42 @@ func OverlayWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		procDestroyWindow.Call(hwnd)
 		return 0
 
+	case WM_OVERLAY_SET_OPACITY:
+		// wParam contains alpha value (0-255)
+		alpha := byte(wParam)
+		if alpha < 50 {
+			alpha = 50
+		}
+		o.log.Debugf("WM_OVERLAY_SET_OPACITY received: alpha=%d", alpha)
+		procSetLayeredWindowAttributes.Call(hwnd, 0, uintptr(alpha), LWA_ALPHA)
+		return 0
+
+	case WM_OVERLAY_UPDATE_POS:
+		// wParam contains position code: 0=top-right, 1=top-left, 2=bottom-right, 3=bottom-left
+		o.log.Debugf("WM_OVERLAY_UPDATE_POS received: pos=%d", wParam)
+		screenWidth, _, _ := procGetSystemMetrics.Call(0)
+		screenHeight, _, _ := procGetSystemMetrics.Call(1)
+		padding := int32(15)
+		var x, y int32
+		switch wParam {
+		case 1: // top-left
+			x, y = padding, padding
+		case 2: // bottom-right
+			x, y = int32(screenWidth)-o.width-padding, int32(screenHeight)-o.height-padding-50
+		case 3: // bottom-left
+			x, y = padding, int32(screenHeight)-o.height-padding-50
+		default: // 0 = top-right
+			x, y = int32(screenWidth)-o.width-padding, padding
+		}
+		procSetWindowPos.Call(hwnd, HWND_TOPMOST, uintptr(x), uintptr(y), 0, 0, SWP_NOSIZE|SWP_NOACTIVATE)
+		return 0
+
+	case WM_OVERLAY_UPDATE_CONFIG:
+		// Config was updated externally, refresh the display
+		o.log.Debug("WM_OVERLAY_UPDATE_CONFIG received")
+		procInvalidateRect.Call(hwnd, 0, 1)
+		return 0
+
 	case WM_NCHITTEST:
 		if o.dragMode.Load() {
 			ret, _, _ := procDefWindowProcW.Call(hwnd, msg, wParam, lParam)
@@ -683,6 +870,13 @@ func (o *Overlay) updateAnimation() {
 	o.anim.cpuPercent = lerp(o.anim.cpuPercent, targetCPU, lerpSpeed)
 	o.anim.ramPercent = lerp(o.anim.ramPercent, targetRAM, lerpSpeed)
 	o.anim.gpuPercent = lerp(o.anim.gpuPercent, targetGPU, lerpSpeed)
+
+	// Add to history every ~500ms (30 frames at 60fps)
+	o.history.ticker++
+	if o.history.ticker >= 30 {
+		o.history.ticker = 0
+		o.addHistorySample(targetCPU, targetRAM, targetGPU)
+	}
 
 	// Critical state
 	const criticalThreshold = 85.0
@@ -749,9 +943,9 @@ func (o *Overlay) paint(hwnd uintptr) {
 	rowHeight := int32(28)
 	labelX := int32(12)
 	barX := int32(52)
-	barWidth := int32(120)
+	barWidth := int32(130)
 	barHeight := int32(8)
-	valueX := int32(180)
+	valueX := int32(190)
 
 	pulseMultiplier := 0.85 + 0.15*math.Sin(o.anim.pulsePhase)
 
@@ -852,7 +1046,6 @@ func (o *Overlay) paint(hwnd uintptr) {
 
 	procEndPaint.Call(hwnd, uintptr(unsafe.Pointer(&ps)))
 }
-
 func (o *Overlay) drawMetricRowAnimated(hdc uintptr, label string, percent float64, isCritical bool, pulseMultiplier float64, y, labelX, barX, barWidth, barHeight, valueX int32) {
 	procSelectObject.Call(hdc, o.fontSmall)
 	if isCritical {
@@ -878,15 +1071,53 @@ func (o *Overlay) drawMetricRowAnimated(hdc uintptr, label string, percent float
 			fillWidth = barWidth
 		}
 
-		fillColor := getValueColor(percent)
-		if isCritical {
-			fillColor = pulseColorFn(fillColor, pulseMultiplier)
-		}
+		// Draw gradient bar - from green to yellow to red based on position
+		// Draw in segments for performance (every 2 pixels)
+		segmentWidth := int32(2)
+		for x := int32(0); x < fillWidth; x += segmentWidth {
+			// Calculate color based on position in the bar (0-100%)
+			posPercent := float64(x) / float64(barWidth) * 100.0
 
-		fillBrush, _, _ := procCreateSolidBrush.Call(fillColor)
-		fillRect := RECT{Left: barX, Top: barY, Right: barX + fillWidth, Bottom: barY + barHeight}
-		procFillRect.Call(hdc, uintptr(unsafe.Pointer(&fillRect)), fillBrush)
-		procDeleteObject.Call(fillBrush)
+			var r, g, b int
+			if posPercent < 50 {
+				// Green to Yellow (0-50%)
+				factor := posPercent / 50.0
+				r = int(factor * 255)
+				g = 200
+				b = 0
+			} else if posPercent < 75 {
+				// Yellow to Orange (50-75%)
+				factor := (posPercent - 50) / 25.0
+				r = 255
+				g = int(200 - factor*80)
+				b = 0
+			} else {
+				// Orange to Red (75-100%)
+				factor := (posPercent - 75) / 25.0
+				r = 255
+				g = int(120 - factor*120)
+				b = 0
+			}
+
+			// Apply pulse effect if critical
+			if isCritical {
+				brightness := 0.7 + 0.3*pulseMultiplier
+				r = int(float64(r) * brightness)
+				g = int(float64(g) * brightness)
+				b = int(float64(b) * brightness)
+			}
+
+			segEnd := x + segmentWidth
+			if segEnd > fillWidth {
+				segEnd = fillWidth
+			}
+
+			color := uintptr(r | (g << 8) | (b << 16))
+			brush, _, _ := procCreateSolidBrush.Call(color)
+			pixelRect := RECT{Left: barX + x, Top: barY, Right: barX + segEnd, Bottom: barY + barHeight}
+			procFillRect.Call(hdc, uintptr(unsafe.Pointer(&pixelRect)), brush)
+			procDeleteObject.Call(brush)
+		}
 	}
 
 	procSelectObject.Call(hdc, o.fontLarge)
@@ -915,4 +1146,43 @@ func pulseColorFn(color uintptr, multiplier float64) uintptr {
 	r = byte(math.Min(255, float64(r)*adjust))
 
 	return uintptr(b) | (uintptr(g) << 8) | (uintptr(r) << 16)
+}
+
+// drawMetricIcon draws a colored icon/symbol for a metric
+func (o *Overlay) drawMetricIcon(hdc uintptr, icon string, x, y int32, color uintptr) {
+	procSelectObject.Call(hdc, o.fontSmall)
+	procSetTextColor.Call(hdc, color)
+	textW, _ := syscall.UTF16FromString(icon)
+	procTextOutW.Call(hdc, uintptr(x), uintptr(y), uintptr(unsafe.Pointer(&textW[0])), uintptr(len(textW)-1))
+}
+
+// drawStylishSeparator draws a stylish dotted separator line
+func (o *Overlay) drawStylishSeparator(hdc uintptr, startX, y, endX int32) {
+	dotBrush, _, _ := procCreateSolidBrush.Call(COLOR_BORDER)
+	// Draw gradient dots
+	dotSpacing := int32(8)
+	dotSize := int32(2)
+	for x := startX; x < endX; x += dotSpacing {
+		// Fade effect at edges
+		distFromCenter := float64(x-startX) / float64(endX-startX)
+		alpha := 1.0
+		if distFromCenter < 0.1 {
+			alpha = distFromCenter * 10
+		} else if distFromCenter > 0.9 {
+			alpha = (1.0 - distFromCenter) * 10
+		}
+
+		if alpha > 0.3 {
+			dotRect := RECT{Left: x, Top: y, Right: x + dotSize, Bottom: y + dotSize}
+			procFillRect.Call(hdc, uintptr(unsafe.Pointer(&dotRect)), dotBrush)
+		}
+	}
+	procDeleteObject.Call(dotBrush)
+
+	// Draw center accent dot
+	accentBrush, _, _ := procCreateSolidBrush.Call(COLOR_ACCENT)
+	centerX := (startX + endX) / 2
+	accentRect := RECT{Left: centerX - 1, Top: y - 1, Right: centerX + 3, Bottom: y + 3}
+	procFillRect.Call(hdc, uintptr(unsafe.Pointer(&accentRect)), accentBrush)
+	procDeleteObject.Call(accentBrush)
 }
